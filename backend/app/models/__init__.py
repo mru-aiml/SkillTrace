@@ -1,0 +1,45 @@
+from app.db.session import Base
+from app.models.entities import (
+    AuditLog,
+    Course,
+    Employer,
+    EmploymentRecord,
+    Followup,
+    JobPostingDemand,
+    Proof,
+    Trainee,
+    TrainingEnrollment,
+    User,
+    VerificationRecord,
+)
+from app.models.enums import (
+    DemandStatus,
+    EmploymentStatus,
+    EnrollmentStatus,
+    FollowupStatus,
+    OutcomeType,
+    ProofStatus,
+    UserRole,
+)
+
+__all__ = [
+    "AuditLog",
+    "Base",
+    "Course",
+    "DemandStatus",
+    "Employer",
+    "EmploymentRecord",
+    "EmploymentStatus",
+    "EnrollmentStatus",
+    "Followup",
+    "FollowupStatus",
+    "JobPostingDemand",
+    "OutcomeType",
+    "Proof",
+    "ProofStatus",
+    "Trainee",
+    "TrainingEnrollment",
+    "User",
+    "UserRole",
+    "VerificationRecord",
+]
