@@ -39,21 +39,21 @@ type Language = "en" | "mr" | "hi";
 const roleCards = [
   {
     key: "trainee",
-    href: "/trainee/dashboard",
+    href: "/login?role=trainee",
     eyebrow: "For trainees",
     icon: GraduationCap,
     tone: "blue",
   },
   {
     key: "employer",
-    href: "/employer/dashboard",
+    href: "/login?role=employer",
     eyebrow: "For employers",
     icon: Building2,
     tone: "green",
   },
   {
     key: "admin",
-    href: "/admin",
+    href: "/login?role=admin",
     eyebrow: "For government & providers",
     icon: BarChart3,
     tone: "amber",
@@ -188,7 +188,15 @@ function JourneyGraphic() {
 }
 
 export function LandingExperience() {
-  const [language, setLanguage] = useState<Language>("en");
+  const [language, setLanguage] = useState<Language>(() => {
+    if (typeof window !== "undefined") {
+      const stored = window.localStorage.getItem("skilltrace.language");
+      if (stored && (stored === "en" || stored === "mr" || stored === "hi")) {
+        return stored as Language;
+      }
+    }
+    return "en";
+  });
   const [activeStep, setActiveStep] = useState(0);
   const copy = landingCopy[language];
   const text = {
@@ -209,7 +217,10 @@ export function LandingExperience() {
     { icon: Route, title: copy.pillars.vision.title, subtitle: "Aligned with Maharashtra Skilling Vision", body: copy.pillars.vision.body },
   ];
   const activeProcess = processSteps[activeStep];
-  useEffect(() => { document.documentElement.lang = language; }, [language]);
+  useEffect(() => { 
+    document.documentElement.lang = language; 
+    window.localStorage.setItem("skilltrace.language", language);
+  }, [language]);
 
   return (
     <div className="min-h-screen overflow-hidden bg-white text-navy-900">
@@ -226,8 +237,8 @@ export function LandingExperience() {
               </h1>
               <p className="pretty-text mt-7 max-w-2xl text-base leading-8 text-white/62 sm:text-lg">{text.body}</p>
               <div className="mt-9 flex flex-col gap-3 sm:flex-row">
-                <Link href="/trainee" className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-saffron px-5 text-sm font-bold text-navy shadow-[0_14px_30px_-14px_rgba(233,144,36,.7)] transition hover:-translate-y-0.5 hover:bg-saffron-500"><CircleUserRound className="size-[18px]" />{text.primary}</Link>
-                <Link href="/dashboard" className="inline-flex h-12 items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/[0.06] px-5 text-sm font-bold text-white transition hover:-translate-y-0.5 hover:bg-white/10">{text.secondary}<ArrowRight className="size-4" /></Link>
+                <Link href="/login?role=trainee" className="inline-flex h-12 items-center justify-center gap-2 rounded-xl bg-saffron px-5 text-sm font-bold text-navy shadow-[0_14px_30px_-14px_rgba(233,144,36,.7)] transition hover:-translate-y-0.5 hover:bg-saffron-500"><CircleUserRound className="size-[18px]" />{text.primary}</Link>
+                <Link href="/login?role=admin" className="inline-flex h-12 items-center justify-center gap-2 rounded-xl border border-white/15 bg-white/[0.06] px-5 text-sm font-bold text-white transition hover:-translate-y-0.5 hover:bg-white/10">{text.secondary}<ArrowRight className="size-4" /></Link>
               </div>
               <div className="mt-9 flex flex-wrap gap-x-6 gap-y-3 border-t border-white/10 pt-5">
                 {[copy.proofOne, copy.proofTwo, copy.proofThree].map((item) => <span key={item} className="inline-flex items-center gap-2 text-[11px] font-semibold text-white/48"><CheckCircle2 className="size-3.5 text-saffron" />{item}</span>)}
@@ -325,7 +336,7 @@ export function LandingExperience() {
         <section id="impact" className="relative overflow-hidden bg-navy py-20 text-white sm:py-24">
           <div className="dark-grid absolute inset-0 opacity-25" /><div className="absolute -right-28 -top-28 size-96 rounded-full border border-white/10" />
           <div className="relative mx-auto grid max-w-7xl gap-10 px-4 sm:px-6 lg:grid-cols-[.85fr_1.15fr] lg:items-center lg:px-8">
-            <div><Badge className="bg-white/10 text-primary-50 ring-white/15" dot>Impact through evidence</Badge><h2 className="mt-5 text-balance text-3xl font-extrabold tracking-[-0.04em] sm:text-4xl">Make every training investment count.</h2><p className="mt-5 text-sm leading-7 text-white/65">See which pathways lead to sustained work, which districts need support and where emerging skills are creating new opportunities.</p><Link href="/admin" className="mt-7 inline-flex h-11 items-center gap-2 rounded-xl bg-white px-4 text-xs font-extrabold text-primary-700 shadow-sm transition hover:-translate-y-0.5">Explore live dashboard<ArrowRight className="size-4" /></Link></div>
+            <div><Badge className="bg-white/10 text-primary-50 ring-white/15" dot>Impact through evidence</Badge><h2 className="mt-5 text-balance text-3xl font-extrabold tracking-[-0.04em] sm:text-4xl">Make every training investment count.</h2><p className="mt-5 text-sm leading-7 text-white/65">See which pathways lead to sustained work, which districts need support and where emerging skills are creating new opportunities.</p><Link href="/login?role=admin" className="mt-7 inline-flex h-11 items-center gap-2 rounded-xl bg-white px-4 text-xs font-extrabold text-primary-700 shadow-sm transition hover:-translate-y-0.5">Explore live dashboard<ArrowRight className="size-4" /></Link></div>
             <div className="grid gap-3 sm:grid-cols-3">
               {[["+12.4%", "Placement lift", Handshake], ["₹3,200", "Median wage growth", TrendingUp], ["4,500", "EV skill gap", Sparkles]].map(([value, label, Icon]) => {
                 const MetricIcon = Icon as typeof Handshake;

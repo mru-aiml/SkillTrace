@@ -2,22 +2,39 @@ import type {
   ApiDashboardData,
   ApiEnvelope,
   ApiErrorPayload,
+  ApiFollowup,
   ApiInsight,
+  ApiEmployerProfile,
+  ApiNotification,
   ApiPassport,
+  AudienceFilter,
+  Automation,
   ApiProof,
+  ApiUser,
   ApiVerificationQueueRow,
   ApiVerificationStatus,
+  ConsentPreferences,
   DashboardData,
   DistrictOutcome,
+  EmployerProfileUpdatePayload,
   LoginCredentials,
   LoginResponse,
+  MessageTemplate,
+  Campaign,
+  NotificationList,
+  OutreachAnalytics,
   OutcomeStatus,
   OutcomeUpdatePayload,
   OutcomeUpdateResult,
+  ProfileUpdatePayload,
+  TraineeOutreachRow,
+  WhatsAppHistoryItem,
+  WhatsAppStatus,
   TraineeProfile,
   VerificationQueueRow,
   VerificationStatus,
   VerificationUpdate,
+  WhatsAppDemoMessage,
 } from "./types";
 import { normalizeRole } from "./types";
 
@@ -60,7 +77,12 @@ async function request<T>(
   );
 
   try {
-    const response = await fetch(`${API_BASE_URL}${path}`, {
+    const url = `${API_BASE_URL}${path}`;
+    if (path === "/auth/login") {
+      console.debug("[API DEBUG] login request started");
+      console.debug("[API DEBUG] URL:", url);
+    }
+    const response = await fetch(url, {
       ...options,
       signal: controller.signal,
       headers: {
@@ -73,6 +95,10 @@ async function request<T>(
     });
 
     const raw = await response.text();
+    if (path === "/auth/login") {
+      console.debug("[API DEBUG] response status:", response.status);
+      console.debug("[API DEBUG] response body received:", raw.length > 0);
+    }
     let payload: ApiEnvelope<T> | ApiErrorPayload | T | undefined;
 
     if (raw) {
@@ -85,14 +111,40 @@ async function request<T>(
 
     if (!response.ok) {
       const errorPayload = payload as ApiErrorPayload | undefined;
-      throw new ApiError(
+      const rawMessage =
         errorPayload?.detail ||
-          errorPayload?.message ||
-          errorPayload?.error ||
-          `Request failed (${response.status})`,
-        response.status,
-        errorPayload?.errors,
-      );
+        errorPayload?.message ||
+        errorPayload?.error ||
+        `Request failed (${response.status})`;
+      if (response.status === 401 && typeof window !== "undefined" && path !== "/auth/login") {
+        // Session is invalid: drop it and send the user to sign in.
+        // Backend is the source of truth; demo (demo-*) tokens never reach here.
+        // A failed /auth/login attempt must never wipe an existing session.
+        try {
+          window.localStorage.removeItem("skilltrace.session.v1");
+        } catch {
+          // Storage unavailable; the redirect below still protects the route.
+        }
+        if (!window.location.pathname.startsWith("/login")) {
+          // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+          window.location.href = "/login";
+        }
+      }
+      // Map status codes to actionable messages for loading/error/empty states.
+      // Login failures surface the backend reason (e.g. "Incorrect email or password").
+      const friendly =
+        response.status === 401 && path !== "/auth/login"
+          ? "Your session has expired. Please sign in again."
+          : response.status === 403
+            ? "You do not have permission to perform this action."
+            : response.status === 422
+              ? rawMessage
+              : response.status === 429
+                ? "Too many requests. Please wait a moment and try again."
+                : response.status >= 500
+                  ? "SkillTrace services are temporarily unavailable. Please retry."
+                  : rawMessage;
+      throw new ApiError(friendly, response.status, errorPayload?.errors);
     }
 
     if (payload && typeof payload === "object" && "success" in payload) {
@@ -220,6 +272,11 @@ export function mapPassportToProfile(passport: ApiPassport): TraineeProfile {
       month_6: passport.retention_milestones.find((item) => item.label === "6M")?.status === "RETAINED" ? 100 : 0,
       month_12: passport.retention_milestones.find((item) => item.label === "12M")?.status === "RETAINED" ? 100 : 0,
     },
+    milestones: passport.retention_milestones.map((item) => ({
+      label: item.label,
+      status: item.status,
+      due_date: item.due_date,
+    })),
     skill_relevance: {
       score: passport.skill_relevance_score,
       label:
@@ -296,6 +353,9 @@ export function mapApiDashboard(response: ApiDashboardData): DashboardData {
       median_monthly_wage: overview.median_monthly_wage ?? 0,
       province: overview.province,
       updated_at: overview.updated_at,
+      pending_verification: overview.pending_verification ?? 0,
+      self_employed: overview.self_employed ?? 0,
+      training_completed: overview.training_completed ?? 0,
       trend: overview.trend.map((point) => {
         return {
           label: monthLabel(point.month),
@@ -360,11 +420,17 @@ const outcomeTypeFromStatus = (status: OutcomeStatus) => {
 
 export const api = {
   async login(credentials: LoginCredentials) {
-    return request<LoginResponse>("/auth/login", {
+    const requestId = typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID().slice(0, 8)
+      : String(Date.now() % 100000);
+    console.debug("[API DEBUG] request id:", requestId);
+    const result = await request<LoginResponse>("/auth/login", {
       method: "POST",
       body: JSON.stringify({ email: credentials.email, password: credentials.password }),
       timeoutMs: 3500,
     });
+    console.debug("[API DEBUG] login success:", !!result?.access_token);
+    return result;
   },
 
   async getDashboard(
@@ -412,6 +478,305 @@ export const api = {
     return request<ApiPassport>("/trainees/me/passport", {
       headers: withAuth(token),
     });
+  },
+
+  /** Role-neutral session validation. Works for TRAINEE, EMPLOYER and GOVERNMENT_ADMIN. */
+  async getCurrentUser(token?: string | null) {
+    return request<ApiUser>("/auth/me", {
+      headers: withAuth(token),
+    });
+  },
+
+  async getMyFollowups(token?: string | null) {
+    return request<ApiFollowup[]>("/trainees/me/followups", {
+      headers: withAuth(token),
+    });
+  },
+
+  async getWhatsAppDemoMessage(token?: string | null) {
+    return request<WhatsAppDemoMessage>("/trainees/me/followups/demo-message", {
+      method: "POST",
+      headers: withAuth(token),
+    });
+  },
+
+  async getWhatsAppStatus(token?: string | null) {
+    return request<WhatsAppStatus>("/notifications/whatsapp/status", {
+      headers: withAuth(token),
+    });
+  },
+
+  async setWhatsAppConsent(consent: boolean, token?: string | null) {
+    return request<{ whatsapp_followup_consent: boolean; cancelled_future: number }>(
+      "/trainees/me/whatsapp-consent",
+      {
+        method: "PATCH",
+        body: JSON.stringify({ consent_given: consent }),
+        headers: withAuth(token),
+      },
+    );
+  },
+
+  async setWhatsAppNumber(phone: string, token?: string | null) {
+    return request<{ phone_saved: boolean; phone_suffix: string }>(
+      "/trainees/me/whatsapp-number",
+      {
+        method: "PATCH",
+        body: JSON.stringify({ phone }),
+        headers: withAuth(token),
+      },
+    );
+  },
+
+  async getWhatsAppHistory(token?: string | null) {
+    return request<WhatsAppHistoryItem[]>("/trainees/me/whatsapp/history", {
+      headers: withAuth(token),
+    });
+  },
+
+  async demoSendWhatsApp(token?: string | null) {
+    return request<{ followup_id: string; status: string; simulated: boolean; sent: boolean; notice: string }>(
+      "/trainees/me/followups/demo-send",
+      {
+        method: "POST",
+        headers: withAuth(token),
+      },
+    );
+  },
+
+  // ---- government outreach (admin JWT required) ----
+
+  async getOutreachAnalytics(token?: string | null) {
+    return request<OutreachAnalytics>("/admin/messaging/analytics", {
+      headers: withAuth(token),
+    });
+  },
+
+  async getMessageTemplates(token?: string | null) {
+    return request<MessageTemplate[]>("/admin/messaging/templates", {
+      headers: withAuth(token),
+    });
+  },
+
+  async createMessageTemplate(
+    payload: { name: string; template_key: string; body: string; variables?: string[] },
+    token?: string | null,
+  ) {
+    return request<MessageTemplate>("/admin/messaging/templates", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: withAuth(token),
+    });
+  },
+
+  async getCampaigns(token?: string | null) {
+    return request<Campaign[]>("/admin/messaging/campaigns", {
+      headers: withAuth(token),
+    });
+  },
+
+  async previewAudience(filter: AudienceFilter, token?: string | null) {
+    return request<{ eligible: number; consent_available: number; excluded: number; total: number; sample: string[] }>(
+      "/admin/messaging/audience/preview",
+      {
+        method: "POST",
+        body: JSON.stringify(filter),
+        headers: withAuth(token),
+      },
+    );
+  },
+
+  async createCampaign(
+    payload: { name: string; template_key: string; audience?: AudienceFilter; scheduled_at?: string },
+    token?: string | null,
+  ) {
+    return request<Campaign>("/admin/messaging/campaigns", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: withAuth(token),
+    });
+  },
+
+  async scheduleCampaign(campaignId: string, token?: string | null) {
+    return request<{ jobs: number; campaign: Campaign }>(
+      `/admin/messaging/campaigns/${campaignId}/schedule`,
+      {
+        method: "POST",
+        headers: withAuth(token),
+      },
+    );
+  },
+
+  async runCampaignDemo(campaignId: string, token?: string | null) {
+    return request<{ checked: number; sent: number; failed: number; cancelled: number; campaign: Campaign }>(
+      `/admin/messaging/campaigns/${campaignId}/run-demo`,
+      {
+        method: "POST",
+        headers: withAuth(token),
+      },
+    );
+  },
+
+  async cancelCampaign(campaignId: string, token?: string | null) {
+    return request<Campaign>(`/admin/messaging/campaigns/${campaignId}/cancel`, {
+      method: "POST",
+      headers: withAuth(token),
+    });
+  },
+
+  async getAutomations(token?: string | null) {
+    return request<Automation[]>("/admin/messaging/automations", {
+      headers: withAuth(token),
+    });
+  },
+
+  async createAutomation(
+    payload: { name: string; trigger_type?: string; delay_days?: number[]; template_key?: string },
+    token?: string | null,
+  ) {
+    return request<Automation>("/admin/messaging/automations", {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: withAuth(token),
+    });
+  },
+
+  async updateAutomation(
+    automationId: string,
+    payload: { name?: string; is_active?: boolean; delay_days?: number[] },
+    token?: string | null,
+  ) {
+    return request<Automation>(`/admin/messaging/automations/${automationId}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+      headers: withAuth(token),
+    });
+  },
+
+  async getOutreachTrainees(params: Record<string, string | undefined>, token?: string | null) {
+    const query = buildQuery(params);
+    return request<{ rows: TraineeOutreachRow[]; counts: { eligible: number; excluded: number; total: number } }>(
+      `/admin/messaging/trainees${query}`,
+      {
+        headers: withAuth(token),
+      },
+    );
+  },
+
+  async getOutreachTrainee(traineeId: string, token?: string | null) {
+    return request<{
+      profile: TraineeOutreachRow;
+      outcomes: Array<Record<string, unknown>>;
+      followups: Array<Record<string, unknown>>;
+    }>(`/admin/messaging/trainees/${traineeId}`, {
+      headers: withAuth(token),
+    });
+  },
+
+  async sendOneMessage(traineeId: string, templateKey: string, token?: string | null) {
+    return request<{ job_id: string; status: string; simulated: boolean; notice: string }>(
+      "/admin/messaging/send-one",
+      {
+        method: "POST",
+        body: JSON.stringify({ trainee_id: traineeId, template_key: templateKey }),
+        headers: withAuth(token),
+      },
+    );
+  },
+
+  async runSchedulerNow(token?: string | null) {
+    return request<{ started: number; checked: number; sent: number; failed: number; cancelled: number }>(
+      "/admin/messaging/run-scheduler",
+      {
+        method: "POST",
+        headers: withAuth(token),
+      },
+    );
+  },
+
+  async getMyProofs(token?: string | null) {
+    return request<ApiProof[]>("/trainees/me/proofs", {
+      headers: withAuth(token),
+    });
+  },
+
+  async getNotifications(token?: string | null) {
+    return request<NotificationList>("/notifications", {
+      headers: withAuth(token),
+    });
+  },
+
+  async markNotificationRead(notificationId: string, token?: string | null) {
+    return request<ApiNotification>(`/notifications/${notificationId}/read`, {
+      method: "PATCH",
+      headers: withAuth(token),
+    });
+  },
+
+  async updateProfile(payload: ProfileUpdatePayload, token?: string | null) {
+    return request<ApiUser & { phone?: string | null } & Record<string, unknown>>(
+      "/trainees/me/profile",
+      {
+        method: "PATCH",
+        body: JSON.stringify(payload),
+        headers: withAuth(token),
+      },
+    );
+  },
+
+  async updateConsent(preferences: Partial<ConsentPreferences>, token?: string | null) {
+    return request<ConsentPreferences>("/trainees/me/consent", {
+      method: "PATCH",
+      body: JSON.stringify(preferences),
+      headers: withAuth(token),
+    });
+  },
+
+  async exportReport(
+    params?: { district?: string; period?: string; startDate?: string; endDate?: string; lens?: string; format?: "csv" | "pdf" },
+    token?: string | null,
+  ) {
+    const query = buildQuery({
+      district: params?.district,
+      period: params?.period,
+      start_date: params?.startDate,
+      end_date: params?.endDate,
+      lens: params?.lens,
+    });
+    const endpoint = params?.format === "pdf" ? "/analytics/export-pdf" : "/analytics/export";
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
+    try {
+      const response = await fetch(`${API_BASE_URL}${endpoint}${query}`, {
+        headers: {
+          Accept: params?.format === "pdf" ? "application/pdf" : "text/csv",
+          ...withAuth(token),
+        },
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        if (response.status === 401 && typeof window !== "undefined"
+            && !window.location.pathname.startsWith("/login")) {
+          try {
+            window.localStorage.removeItem("skilltrace.session.v1");
+          } catch { /* ignore */ }
+          // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+          window.location.href = "/login";
+        }
+        throw new ApiError(
+          response.status === 403
+            ? "You do not have permission to perform this action."
+            : `Export failed (${response.status})`,
+          response.status,
+        );
+      }
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition") ?? "";
+      const match = disposition.match(/filename=([^;]+)/);
+      return { blob, filename: (match?.[1] ?? "").trim() || "skilltrace-report" };
+    } finally {
+      clearTimeout(timeout);
+    }
   },
 
   async getTraineeProfile(token?: string | null) {
@@ -474,11 +839,22 @@ export const api = {
   },
 
   async getVerificationQueue(token?: string | null) {
-    const rows = await request<ApiVerificationQueueRow[]>(
-      "/employer/verification-queue",
-      { headers: withAuth(token) },
-    );
-    return rows.map(mapQueueRow);
+    console.debug("[EMPLOYER QUEUE] request started");
+    try {
+      const rows = await request<ApiVerificationQueueRow[]>(
+        "/employer/verification-queue",
+        { headers: withAuth(token) },
+      );
+      console.debug("[EMPLOYER QUEUE] response status:", 200);
+      console.debug("[EMPLOYER QUEUE] rendered records count:", rows.length);
+      return rows.map(mapQueueRow);
+    } catch (caught) {
+      console.debug(
+        "[EMPLOYER QUEUE] response status:",
+        caught instanceof ApiError ? caught.status : 0,
+      );
+      throw caught;
+    }
   },
 
   async updateVerification(
@@ -486,8 +862,13 @@ export const api = {
     update: VerificationUpdate,
     token?: string | null,
   ) {
+    const status = update.decision === "reject"
+      ? "Rejected"
+      : update.correction_reason
+        ? "Needs Correction"
+        : "Verified";
     const body: Record<string, unknown> = {
-      status: update.correction_reason ? "Needs Correction" : "Verified",
+      status,
       role: update.role,
       start_date: update.joining_date,
       wage_band: update.wage_band,
@@ -511,6 +892,20 @@ export const api = {
       body: JSON.stringify(body),
       headers: withAuth(token),
       timeoutMs: 4500,
+    });
+  },
+
+  async getEmployerProfile(token?: string | null) {
+    return request<ApiEmployerProfile>("/employer/me", {
+      headers: withAuth(token),
+    });
+  },
+
+  async updateEmployerProfile(payload: EmployerProfileUpdatePayload, token?: string | null) {
+    return request<ApiEmployerProfile>("/employer/me", {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+      headers: withAuth(token),
     });
   },
 

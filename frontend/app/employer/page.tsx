@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { RoleGuard } from "@/components/layout/AccessControl";
 import { EmployerDashboard } from "@/components/employer/EmployerDashboard";
 
 export const metadata: Metadata = {
@@ -7,5 +8,10 @@ export const metadata: Metadata = {
 };
 
 export default function EmployerPage() {
-  return <EmployerDashboard />;
+  return (
+    <>
+      <RoleGuard role="employer" />
+      <EmployerDashboard />
+    </>
+  );
 }

@@ -27,6 +27,9 @@ class OverviewResponse(BaseModel):
     trend: list[TrendPoint]
     province: str
     updated_at: datetime
+    pending_verification: int = 0
+    self_employed: int = 0
+    training_completed: int = 0
 
 
 class DistrictAnalytics(BaseModel):
@@ -42,6 +45,8 @@ class DistrictAnalytics(BaseModel):
     risk_level: str
     lat: float | None
     lng: float | None
+    pending_verification: int = 0
+    followup_due: int = 0
 
 
 class DistrictsResponse(BaseModel):

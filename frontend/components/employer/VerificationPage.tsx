@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
   AlertTriangle,
@@ -28,11 +28,13 @@ import { demoVerificationQueue } from "@/lib/demo-data";
 import { formatDate, getInitials } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 
-type Decision = "confirm" | "correction";
+type Decision = "confirm" | "correction" | "reject";
 type Relevance = "yes" | "partially" | "no";
 
 export function VerificationPage({ id }: { id: string }) {
-  const request = useMemo(() => demoVerificationQueue.find((item) => item.employment_id === id) ?? demoVerificationQueue[0], [id]);
+  const [liveRequest, setLiveRequest] = useState<(typeof demoVerificationQueue)[number] | null>(null);
+  const [loadError, setLoadError] = useState("");
+  const request = useMemo(() => liveRequest ?? demoVerificationQueue.find((item) => item.employment_id === id) ?? demoVerificationQueue[0], [id, liveRequest]);
   const [decision, setDecision] = useState<Decision>("confirm");
   const [rating, setRating] = useState(0);
   const [relevance, setRelevance] = useState<Relevance>("yes");
@@ -42,13 +44,44 @@ export function VerificationPage({ id }: { id: string }) {
   const [submitting, setSubmitting] = useState(false);
   const { token, isDemoSession } = useAuth();
 
+  useEffect(() => {
+    if (!token || isDemoSession || token.startsWith("demo-")) return;
+    let active = true;
+    api
+      .getVerificationQueue(token)
+      .then((rows) => {
+        if (!active) return;
+        const found = rows.find((row) => row.employment_id === id);
+        if (found) {
+          setLiveRequest({
+            ...found,
+            trainee: { ...found.trainee },
+            course: { ...found.course, pass_year: found.course.pass_year },
+            reported: { ...found.reported },
+          } as (typeof demoVerificationQueue)[number]);
+        } else {
+          setLoadError("This request is not in your live verification queue. Showing demo data.");
+        }
+      })
+      .catch(() => {
+        if (active) setLoadError("Live queue unavailable — showing demo data.");
+      });
+    return () => {
+      active = false;
+    };
+  }, [id, token, isDemoSession]);
+
   const submit = async () => {
     if (!rating) {
       setError("Add an overall performance rating before submitting.");
       return;
     }
-    if (decision === "correction" && !feedback.trim()) {
-      setError("Add a short note explaining what needs correction.");
+    if (decision !== "confirm" && !feedback.trim()) {
+      setError(
+        decision === "reject"
+          ? "Add a short note explaining why the claim is rejected."
+          : "Add a short note explaining what needs correction.",
+      );
       return;
     }
     setError("");
@@ -66,7 +99,8 @@ export function VerificationPage({ id }: { id: string }) {
             location: request.reported.location,
             skill_relevance: rating,
             feedback,
-            ...(decision === "correction" ? { correction_reason: feedback } : {}),
+            decision,
+            ...(decision !== "confirm" ? { correction_reason: feedback } : {}),
           },
           token,
         );
@@ -93,22 +127,28 @@ export function VerificationPage({ id }: { id: string }) {
           <div className="mx-auto grid size-20 place-items-center rounded-full bg-emerald-50 text-success-600">
             <CheckCircle2 className="size-10 animate-scale-in" />
           </div>
-          <Badge tone={decision === "confirm" ? "green" : "amber"} className="mx-auto mt-6" dot>
-            {decision === "confirm" ? "Employment verified" : "Correction requested"}
+          <Badge tone={decision === "confirm" ? "green" : decision === "reject" ? "red" : "amber"} className="mx-auto mt-6" dot>
+            {decision === "confirm" ? "Employment verified" : decision === "reject" ? "Claim rejected" : "Correction requested"}
           </Badge>
           <h1 className="mt-4 text-2xl font-extrabold tracking-tight text-navy-900">
-            {decision === "confirm" ? "Thank you for closing the loop." : "The trainee has a clear next step."}
+            {decision === "confirm" ? "Thank you for closing the loop." : decision === "reject" ? "The claim has been rejected." : "The trainee has a clear next step."}
           </h1>
           <p className="mx-auto mt-3 max-w-md text-sm leading-6 text-navy-500">
             {decision === "confirm"
               ? `${request.trainee.name}’s employment and skill feedback are now reflected in the Outcome Passport.`
-              : `A correction request for ${request.trainee.name} is ready with your structured note.`}
+              : decision === "reject"
+                ? `${request.trainee.name}’s claim was rejected with your note and removed from the verification queue.`
+                : `A correction request for ${request.trainee.name} is ready with your structured note.`}
           </p>
           <div className="mx-auto mt-6 flex max-w-sm items-center gap-3 rounded-xl border border-navy-100 bg-soft-slate p-4 text-left">
             <div className="grid size-9 place-items-center rounded-lg bg-primary-50 text-primary-700"><ShieldCheck className="size-4" /></div>
             <div>
               <p className="text-xs font-extrabold text-navy-900">Request {request.employment_id}</p>
-              <p className="mt-0.5 text-[10px] text-navy-400">Submitted just now · Demo response saved locally</p>
+              <p className="mt-0.5 text-[10px] text-navy-400">
+                {isDemoSession || !token || token.startsWith("demo-")
+                  ? "Submitted just now · Demo response saved locally"
+                  : "Submitted just now · Saved to the SkillTrace backend"}
+              </p>
             </div>
           </div>
           <div className="mt-7 flex flex-col justify-center gap-3 sm:flex-row">
@@ -126,6 +166,9 @@ export function VerificationPage({ id }: { id: string }) {
         <Link href="/employer/dashboard" className="inline-flex items-center gap-1.5 text-xs font-extrabold text-navy-500 transition hover:text-primary-600">
           <ArrowLeft className="size-4" /> Back to verification queue
         </Link>
+        {loadError && (
+          <p className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-[11px] font-bold text-amber-800" role="status">{loadError}</p>
+        )}
 
         <div className="mt-5 grid gap-5 lg:grid-cols-[.82fr_1.18fr]">
           <div className="space-y-5">
@@ -192,7 +235,7 @@ export function VerificationPage({ id }: { id: string }) {
             <div className="space-y-7 p-5 sm:p-6">
               <fieldset>
                 <legend className="text-sm font-extrabold text-navy-900">1. Employment decision</legend>
-                <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <div className="mt-3 grid gap-3 sm:grid-cols-3">
                   <button
                     type="button"
                     onClick={() => { setDecision("confirm"); setError(""); }}
@@ -215,6 +258,18 @@ export function VerificationPage({ id }: { id: string }) {
                     <div>
                       <p className="text-xs font-extrabold text-navy-900">Needs Correction / Not Employed</p>
                       <p className="mt-1 text-[10px] leading-4 text-navy-500">The record is inaccurate or employment has ended.</p>
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setDecision("reject"); setError(""); }}
+                    className={cn("flex items-start gap-3 rounded-xl border p-4 text-left transition", decision === "reject" ? "border-red-500 bg-red-50 ring-4 ring-red-500/10" : "border-navy-200 hover:border-red-300")}
+                    aria-pressed={decision === "reject"}
+                  >
+                    <div className={cn("grid size-9 shrink-0 place-items-center rounded-lg", decision === "reject" ? "bg-red-600 text-white" : "bg-red-50 text-red-600")}><X className="size-4" /></div>
+                    <div>
+                      <p className="text-xs font-extrabold text-navy-900">Reject claim</p>
+                      <p className="mt-1 text-[10px] leading-4 text-navy-500">The employment claim is invalid or fraudulent.</p>
                     </div>
                   </button>
                 </div>
@@ -274,10 +329,14 @@ export function VerificationPage({ id }: { id: string }) {
                 />
               </label>
 
-              {decision === "correction" && (
+              {decision !== "confirm" && (
                 <div className="flex gap-3 rounded-xl border border-warning-200 bg-warning-50 p-4">
                   <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning-700" />
-                  <p className="text-[10px] leading-5 text-navy-600">A correction note is required so the trainee knows exactly what to update.</p>
+                  <p className="text-[10px] leading-5 text-navy-600">
+                    {decision === "reject"
+                      ? "A rejection note is required so the decision is recorded with a reason."
+                      : "A correction note is required so the trainee knows exactly what to update."}
+                  </p>
                 </div>
               )}
               {error && <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-[11px] font-bold text-red-700" role="alert">{error}</div>}

@@ -523,6 +523,10 @@ def seed_database(target_engine: Engine = engine, *, reset: bool = False) -> boo
                 consent_given_at=datetime.now(UTC) - timedelta(days=400),
                 consent_version="2025.1",
                 data_processing_allowed=True,
+                employer_verification_consent=True,
+                followup_consent=(index % 4 != 3),
+                email_followup_consent=(index % 3 != 2),
+                whatsapp_followup_consent=(index % 3 != 0),
             )
             db.add(trainee)
             db.flush()
@@ -753,15 +757,42 @@ def seed_database(target_engine: Engine = engine, *, reset: bool = False) -> boo
                     next_followup_date=today + timedelta(days=rng.randint(30, 120)),
                 )
             )
+            next_status = FollowupStatus.SCHEDULED
+            next_date = today + timedelta(days=rng.randint(20, 120))
+            next_channel: str | None = None
+            if index == 0:
+                pass  # demo login account keeps an upcoming follow-up
+            elif index % 5 == 0:
+                next_date = today - timedelta(days=rng.randint(1, 10))  # overdue
+            elif index % 5 == 1:
+                next_status = FollowupStatus.DELIVERED
+                next_date = today - timedelta(days=rng.randint(1, 20))
+                next_channel = "WHATSAPP+EMAIL" if index % 2 else "EMAIL"
+            elif index % 5 == 2:
+                next_status = FollowupStatus.FAILED
+                next_date = today - timedelta(days=rng.randint(1, 15))
+                next_channel = "WHATSAPP"
             db.add(
                 Followup(
                     id=stable_id("followup-next", index),
                     trainee_id=trainee.id,
                     employment_id=employment.id,
                     created_by_id=admin_user.id,
-                    status=FollowupStatus.SCHEDULED,
-                    scheduled_for=today + timedelta(days=rng.randint(20, 120)),
+                    status=next_status,
+                    scheduled_for=next_date,
                     contact_method="PHONE",
+                    channel=next_channel,
+                    attempt_count=1 if next_status != FollowupStatus.SCHEDULED else 0,
+                    sent_at=(completed_followup_at if next_status
+                             != FollowupStatus.SCHEDULED else None),
+                    delivered_at=(completed_followup_at if next_status
+                                  == FollowupStatus.DELIVERED else None),
+                    failed_at=(completed_followup_at if next_status
+                               == FollowupStatus.FAILED else None),
+                    provider_message_id=(f"seed-{next_channel}-{index}"
+                                         if next_channel else None),
+                    last_error=("Seeded delivery failure (provider timeout)"
+                                if next_status == FollowupStatus.FAILED else None),
                     notes=(
                         "Employer correction pending"
                         if status == EmploymentStatus.NEEDS_CORRECTION

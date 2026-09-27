@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { RoleGuard } from "@/components/layout/AccessControl";
 import { OutcomeUpdateWizard } from "@/components/trainee/OutcomeUpdateWizard";
 
 export const metadata: Metadata = {
@@ -7,5 +8,10 @@ export const metadata: Metadata = {
 };
 
 export default function TraineeUpdatePage() {
-  return <OutcomeUpdateWizard />;
+  return (
+    <>
+      <RoleGuard role="trainee" />
+      <OutcomeUpdateWizard />
+    </>
+  );
 }

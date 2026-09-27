@@ -46,15 +46,43 @@ class Settings(BaseSettings):
     auto_seed_demo: bool = True
     province: str = "Maharashtra"
     sql_echo: bool = False
+    frontend_url: str = "http://localhost:3000"
+    # Follow-up scheduling (days)
+    followup_employed_days: int = 90
+    followup_seeking_job_days: int = 30
+    followup_retention_6m_days: int = 180
+    followup_retention_12m_days: int = 365
+    # Notifications
+    notification_mode: str = "console"  # console | real | disabled
+    whatsapp_enabled: bool = False
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_whatsapp_from: str = ""
+    twilio_template_sid: str = ""
+    # WhatsApp provider abstraction: demo | twilio | meta (Meta Cloud API).
+    # Tokens are server-side only and never exposed to the frontend.
+    whatsapp_provider: str = "demo"
+    whatsapp_api_url: str = ""
+    whatsapp_access_token: str = ""
+    whatsapp_phone_number_id: str = ""
+    whatsapp_webhook_secret: str = ""
+    email_enabled: bool = False
+    email_provider: str = ""
+    email_from: str = ""
+    email_api_key: str = ""
 
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors_origins(cls, value: object) -> object:
         if isinstance(value, str):
             stripped = value.strip()
+
             if stripped.startswith("["):
-                return value
+                import json
+                return json.loads(stripped)
+
             return [item.strip() for item in stripped.split(",") if item.strip()]
+
         return value
 
     @property

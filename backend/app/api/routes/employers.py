@@ -4,11 +4,12 @@ from decimal import Decimal
 from uuid import UUID
 
 from fastapi import APIRouter, HTTPException, Request
-from sqlalchemy import select, update
+from sqlalchemy import select
 
 from app.api.deps import CurrentEmployer, CurrentUser, DbSession
 from app.core.responses import success
 from app.models import (
+    Employer,
     EmploymentRecord,
     Followup,
     Trainee,
@@ -18,6 +19,8 @@ from app.models import (
 from app.models.base import utc_now
 from app.models.enums import EmploymentStatus, FollowupStatus
 from app.schemas.employer import (
+    EmployerProfile,
+    EmployerProfileUpdate,
     QueueCourse,
     QueueReported,
     QueueTrainee,
@@ -27,6 +30,7 @@ from app.schemas.employer import (
     VerificationQueueRow,
 )
 from app.services.audit import add_audit_log
+from app.services.notifications.store import notify, notify_admins
 from app.services.risk import confidence_for_outcome
 
 router = APIRouter(prefix="/employer", tags=["Employer"])
@@ -114,6 +118,73 @@ def verification_queue(employer: CurrentEmployer, db: DbSession):
     return success(rows)
 
 
+def _employer_profile_payload(employer: Employer) -> EmployerProfile:
+    return EmployerProfile(
+        id=employer.id,
+        full_name=employer.user.full_name,
+        email=employer.user.email,
+        phone=employer.user.phone,
+        role=employer.user.role.value,
+        organization_name=employer.organization_name,
+        organization_type=employer.organization_type,
+        registration_number=employer.registration_number,
+        district=employer.district,
+        address=employer.address,
+        website=employer.website,
+        is_verified=employer.is_verified,
+    )
+
+
+@router.get("/me", response_model=None)
+def get_my_profile(employer: CurrentEmployer):
+    """Return the authenticated employer's own profile."""
+    return success(_employer_profile_payload(employer))
+
+
+@router.patch("/me", response_model=None)
+def update_my_profile(
+    payload: EmployerProfileUpdate,
+    request: Request,
+    employer: CurrentEmployer,
+    db: DbSession,
+):
+    """Update editable employer profile fields. Email, role, registration
+    number and verification status can never be changed here, and an
+    employer can only ever modify their own record (from CurrentEmployer)."""
+    user = employer.user
+    if payload.full_name is not None:
+        user.full_name = payload.full_name.strip()
+    if payload.phone is not None:
+        phone = payload.phone.strip()
+        user.phone = phone or None
+    if payload.organization_name is not None:
+        employer.organization_name = payload.organization_name.strip()
+    if payload.district is not None:
+        employer.district = payload.district.strip()
+    if payload.address is not None:
+        address = payload.address.strip()
+        employer.address = address or None
+    if payload.website is not None:
+        website = payload.website.strip()
+        employer.website = website or None
+    db.add(user)
+    db.add(employer)
+    db.flush()
+    add_audit_log(
+        db,
+        actor_id=user.id,
+        action="EMPLOYER_PROFILE_UPDATED",
+        entity_type="employer",
+        entity_id=employer.id,
+        details={k: v for k, v in payload.model_dump().items() if v is not None},
+        ip_address=request.client.host if request.client else None,
+    )
+    db.commit()
+    db.refresh(user)
+    db.refresh(employer)
+    return success(_employer_profile_payload(employer))
+
+
 @router.patch("/verifications/{employment_id}", response_model=None)
 def update_verification(
     employment_id: UUID,
@@ -136,11 +207,12 @@ def update_verification(
         raise HTTPException(status_code=404, detail="Verification record not found")
 
     old_status = employment.status.value
-    new_status = (
-        EmploymentStatus.VERIFIED
-        if payload.status == VerificationDecision.VERIFIED
-        else EmploymentStatus.NEEDS_CORRECTION
-    )
+    if payload.status == VerificationDecision.VERIFIED:
+        new_status = EmploymentStatus.VERIFIED
+    elif payload.status == VerificationDecision.REJECTED:
+        new_status = EmploymentStatus.REJECTED
+    else:
+        new_status = EmploymentStatus.NEEDS_CORRECTION
     changed_fields: dict[str, object] = {}
     for field in (
         "role",
@@ -201,22 +273,71 @@ def update_verification(
     db.add(verification)
     db.flush()
 
-    # A correction unlocks the next scheduled trainee follow-up.
+    # A correction creates a visible trainee follow-up so the trainee knows
+    # exactly what to fix, and keeps the existing scheduled one for history.
     if new_status == EmploymentStatus.NEEDS_CORRECTION:
-        db.execute(
-            update(Followup)
-            .where(
-                Followup.employment_id == employment.id,
-                Followup.status == FollowupStatus.SCHEDULED,
-            )
-            .values(
-                status=FollowupStatus.SCHEDULED,
-                contact_method="PHONE",
-                notes="Employer requested outcome correction",
-                updated_at=now,
-            )
+        reason = (payload.notes or "Employer requested a correction to your "
+                  "employment information.").strip()
+        correction_followup = Followup(
+            trainee_id=employment.trainee_id,
+            employment_id=employment.id,
+            created_by_id=current_user.id,
+            status=FollowupStatus.SCHEDULED,
+            scheduled_for=now.date(),
+            contact_method="PHONE",
+            notes=f"Employer requested a correction to your employment "
+                  f"information. Reason: {reason} [Update employment details]",
+            next_followup_date=None,
+        )
+        db.add(correction_followup)
+        db.flush()
+        add_audit_log(
+            db,
+            actor_id=current_user.id,
+            action="FOLLOWUP_CREATED",
+            entity_type="followup",
+            entity_id=correction_followup.id,
+            details={"reason": "employer_correction",
+                     "employment_id": str(employment.id)},
+            ip_address=request.client.host if request.client else None,
         )
 
+    trainee_owner = db.get(Trainee, employment.trainee_id)
+    if trainee_owner is not None:
+        if new_status == EmploymentStatus.VERIFIED:
+            notify(
+                db,
+                trainee_owner.user_id,
+                "verification",
+                "Employment verified",
+                f"{employer.organization_name} verified your role as "
+                f"{employment.role or 'reported role'}.",
+            )
+        elif new_status == EmploymentStatus.REJECTED:
+            notify(
+                db,
+                trainee_owner.user_id,
+                "verification",
+                "Employment not confirmed",
+                f"{employer.organization_name} could not confirm your reported "
+                f"employment. Please review and update your outcome.",
+            )
+        else:
+            notify(
+                db,
+                trainee_owner.user_id,
+                "verification",
+                "Correction requested",
+                f"{employer.organization_name} requested a correction to your "
+                f"employment information. Please review the follow-up.",
+            )
+    notify_admins(
+        db,
+        "verification",
+        f"Outcome {new_status.value.lower().replace('_', ' ')}",
+        f"{employer.organization_name} set an employment outcome to "
+        f"{new_status.value}.",
+    )
     add_audit_log(
         db,
         actor_id=current_user.id,

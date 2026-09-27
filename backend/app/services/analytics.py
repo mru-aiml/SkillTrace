@@ -15,6 +15,7 @@ from app.models import (
     AuditLog,
     Course,
     EmploymentRecord,
+    Followup,
     JobPostingDemand,
     Trainee,
     TrainingEnrollment,
@@ -23,6 +24,7 @@ from app.models.enums import (
     DemandStatus,
     EmploymentStatus,
     EnrollmentStatus,
+    FollowupStatus,
     OutcomeType,
 )
 from app.schemas.analytics import (
@@ -56,6 +58,7 @@ class AnalyticsFilters:
     end_date: date | None = None
     district: str | None = None
     period: str | None = None
+    lens: str | None = None
 
 
 def _today() -> date:
@@ -333,6 +336,19 @@ class AnalyticsService:
             trend=self._trend(trained_ids, placements),
             province=self.province,
             updated_at=updated_at,
+            pending_verification=sum(
+                1 for record in placements
+                if record.status in {
+                    EmploymentStatus.REPORTED,
+                    EmploymentStatus.PENDING,
+                    EmploymentStatus.NEEDS_CORRECTION,
+                }
+            ),
+            self_employed=len({
+                record.trainee_id for record in placements
+                if record.outcome_type == OutcomeType.SELF_EMPLOYED
+            }),
+            training_completed=len(trained_ids),
         )
 
     def _risk_context(
@@ -388,6 +404,24 @@ class AnalyticsService:
             placed_ids = self._unique_placed(district_placements)
             retained_ids = self._retention_ids(district_placements, as_of)
             wages = self._wages(district_placements)
+            pending_statuses = {
+                EmploymentStatus.REPORTED,
+                EmploymentStatus.PENDING,
+                EmploymentStatus.NEEDS_CORRECTION,
+            }
+            district_pending = sum(
+                1 for record in district_placements if record.status in pending_statuses
+            )
+            due_cutoff = as_of + timedelta(days=30)
+            district_followup_due = self.db.scalar(
+                select(func.count())
+                .select_from(Followup)
+                .where(
+                    Followup.trainee_id.in_(district_ids),
+                    Followup.status == FollowupStatus.SCHEDULED,
+                    Followup.scheduled_for <= due_cutoff,
+                )
+            ) or 0
             self_employed_ids = {
                 record.trainee_id
                 for record in district_placements
@@ -441,6 +475,10 @@ class AnalyticsService:
                     lng=round(sum(longitudes) / len(longitudes), 6)
                     if longitudes
                     else None,
+                    pending_verification=sum(
+                        1 for record in district_placements if record.status in pending_statuses
+                    ),
+                    followup_due=int(district_followup_due),
                 )
             )
         return DistrictsResponse(districts=result)

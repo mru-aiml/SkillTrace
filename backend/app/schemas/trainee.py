@@ -89,6 +89,55 @@ class TraineeProfile(BaseModel):
     longitude: float | None
     consent_given: bool
     data_processing_allowed: bool
+    employer_verification_consent: bool = False
+    followup_consent: bool = False
+    email_followup_consent: bool = False
+    whatsapp_followup_consent: bool = False
+
+
+class ConsentUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    data_processing_allowed: bool | None = None
+    consent_given: bool | None = None
+    employer_verification_consent: bool | None = None
+    followup_consent: bool | None = None
+    email_followup_consent: bool | None = None
+    whatsapp_followup_consent: bool | None = None
+
+
+class ProfileUpdate(BaseModel):
+    """Editable profile fields. Email, role and identifiers are identity and
+    can never be changed through this endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str | None = Field(default=None, min_length=2, max_length=160)
+    phone: str | None = Field(default=None, max_length=32)
+    district: str | None = Field(default=None, max_length=100)
+    address: str | None = Field(default=None, max_length=500)
+
+
+class FollowupResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    employment_id: UUID | None
+    status: str
+    scheduled_for: date
+    completed_at: datetime | None = None
+    contact_method: str | None = None
+    channel: str | None = None
+    notes: str | None = None
+    next_followup_date: date | None = None
+    attempt_count: int = 0
+    sent_at: datetime | None = None
+    delivered_at: datetime | None = None
+    last_error: str | None = None
+    template: str | None = None
+    response: str | None = None
+    responded_at: datetime | None = None
+    provider_message_id: str | None = None
 
 
 class OutcomeSummary(BaseModel):

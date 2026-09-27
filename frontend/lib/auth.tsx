@@ -54,12 +54,110 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [isDemoSession, setIsDemoSession] = useState(false);
 
   useEffect(() => {
-    setSession(getStoredSession());
-    setIsHydrated(true);
+    let mounted = true;
+    const stored = getStoredSession();
+    // Token being validated. If the user logs in/out while this request is
+    // in flight, the stored token changes and this stale result must NOT
+    // overwrite the fresh session, clear it, or force a redirect.
+    const validatingToken = stored?.token ?? null;
+    const isStale = () => {
+      try {
+        const current = window.localStorage.getItem(STORAGE_KEY);
+        if (validatingToken === null) return current !== null;
+        if (!current) return true;
+        return (JSON.parse(current) as StoredSession)?.token !== validatingToken;
+      } catch {
+        return false;
+      }
+    };
+    console.debug("[AUTH HYDRATION] starting");
+    console.debug("[AUTH HYDRATION] stored session exists:", !!stored);
+
+    if (stored?.token && !stored.token.startsWith("demo-")) {
+      // Validate the JWT against the role-neutral /auth/me endpoint.
+      // A trainee-only endpoint must never gate employer/admin sessions.
+      console.debug("[AUTH HYDRATION] /auth/me started");
+      api.getCurrentUser(stored.token)
+        .then((me) => {
+          if (!mounted || isStale()) return;
+          const role = normalizeRole(me.role);
+          console.debug("[AUTH HYDRATION] backend user role:", role);
+          const profile = demoUsers[role];
+          const user: AuthUser = {
+            id: me.id,
+            name: me.full_name || profile.name,
+            email: me.email,
+            role,
+            organization: profile.organization,
+          };
+          const next: StoredSession = { token: stored.token, user };
+          try {
+            window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+          } catch {
+            // Storage unavailable; in-memory session still works for this visit.
+          }
+          setSession(next);
+          setIsDemoSession(false);
+          setIsHydrated(true);
+        })
+        .catch((caught: unknown) => {
+          if (!mounted || isStale()) return;
+          const status = caught instanceof ApiError ? caught.status : 0;
+          if (status === 0) {
+            // Backend unreachable (offline): keep the stored session so the
+            // UI can render cached/demo data, but do not redirect.
+            setSession(stored);
+            setIsDemoSession(false);
+            setIsHydrated(true);
+            return;
+          }
+          // 401/403/...: token is invalid or user inactive — clear and redirect.
+          try {
+            window.localStorage.removeItem(STORAGE_KEY);
+          } catch {
+            // Storage unavailable; in-memory clearing below still protects routes.
+          }
+          setSession(null);
+          setIsDemoSession(false);
+            setIsHydrated(true);
+            if (!window.location.pathname.startsWith("/login")) {
+              // Full reload guarantees every cached auth state is dropped.
+              // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+              window.location.href = "/login";
+            }
+        });
+    } else {
+      // No session, or a legacy demo token (no longer minted): start clean.
+      // Legacy demo tokens are NOT valid authentication.
+      if (stored) {
+        try {
+          window.localStorage.removeItem(STORAGE_KEY);
+        } catch {
+          // Ignore storage errors during cleanup.
+        }
+      }
+      setSession(null);
+      setIsDemoSession(false);
+      setIsHydrated(true);
+    }
+
+    return () => { mounted = false; };
   }, []);
 
   const persist = useCallback((next: StoredSession, demo: boolean) => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    try {
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      // Storage blocked/unavailable: keep the in-memory session so the
+      // just-completed backend login still redirects to the dashboard.
+    }
+    console.debug("[AUTH] session stored:", (() => {
+      try {
+        return !!window.localStorage.getItem(STORAGE_KEY);
+      } catch {
+        return false;
+      }
+    })());
     setSession(next);
     setIsDemoSession(demo);
   }, []);
@@ -69,6 +167,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setIsSubmitting(true);
       setError(null);
       try {
+        // Real backend authentication only. The backend determines the role;
+        // the UI role selector is a hint and never grants authorization.
+        console.debug("[API AUTH] login request started");
         const result = await api.login(credentials);
         const role = normalizeRole(result.user.role);
         const profile = demoUsers[role];
@@ -81,25 +182,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         };
         const next: StoredSession = { token: result.access_token, user };
         persist(next, false);
+        console.debug("[LOGIN DEBUG] session persisted");
         return user;
       } catch (caught) {
-        const expectedPassword = credentials.password === "Demo@123";
-        const expectedEmail = `${credentials.role ?? "trainee"}@skilltrace.in`;
-        if (expectedPassword && credentials.email === expectedEmail) {
-          const profile = demoUsers[credentials.role ?? "trainee"];
-          const next: StoredSession = {
-            token: `demo-${credentials.role ?? "trainee"}-${Date.now()}`,
-            user: {
-              id: `demo-${credentials.role ?? "trainee"}`,
-              name: profile.name,
-              email: profile.email,
-              role: credentials.role ?? "trainee",
-              organization: profile.organization,
-            },
-          };
-          persist(next, true);
-          return next.user;
-        }
         const message =
           caught instanceof ApiError
             ? caught.message
@@ -130,6 +215,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setSession(null);
     setIsDemoSession(false);
     setError(null);
+    // Full reload guarantees every cached auth state is dropped.
+    // eslint-disable-next-line @next/next/no-location-assign-relative-destination
+    window.location.href = "/login";
   }, []);
 
   const value = useMemo<AuthContextValue>(

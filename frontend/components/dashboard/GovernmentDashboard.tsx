@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   Activity,
   AlertTriangle,
@@ -9,14 +10,18 @@ import {
   BriefcaseBusiness,
   CalendarRange,
   CheckCircle2,
+  Database,
   GraduationCap,
   IndianRupee,
   Lightbulb,
+  ListChecks,
   MapPinned,
   ShieldCheck,
   Sparkles,
   Target,
   TrendingUp,
+  UsersRound,
+  Wrench,
 } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
 import { AttritionDonut, FunnelChart, OutcomeTrendChart, SkillGapBars } from "@/components/charts/ClientCharts";
@@ -29,8 +34,13 @@ import { StatCard } from "@/components/ui/StatCard";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { demoDashboardData, formatIndianNumber } from "@/lib/demo-data";
-import type { DataSourceState } from "@/lib/types";
+import { findDistrictIdByName, getSkillGapSectors } from "@/lib/dashboard-utils";
+import type { DataSourceState, DistrictOutcome } from "@/lib/types";
 import { cn, formatDateTime } from "@/lib/utils";
+
+function scrollToSection(id: string) {
+  document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
 
 function ChartTable({ headers, rows }: { headers: string[]; rows: Array<Array<string | number>> }) {
   return (
@@ -54,26 +64,50 @@ export function GovernmentDashboard() {
   const { token, isDemoSession } = useAuth();
   const [data, setData] = useState(demoDashboardData);
   const [districtId, setDistrictId] = useState("all");
-  const [skillSector, setSkillSector] = useState(data["skill-gaps"].sectors[0].sector);
+  const [skillSector, setSkillSector] = useState("");
   const [fromDate, setFromDate] = useState("2026-04-01");
   const [toDate, setToDate] = useState("2026-09-25");
   const [period, setPeriod] = useState("Last 12 months");
+  const [lens, setLens] = useState("outcomes");
+  const [districtQuery, setDistrictQuery] = useState("");
+  const [riskFilter, setRiskFilter] = useState("all");
+  const [employmentFilter, setEmploymentFilter] = useState("all");
+  const [retentionFilter, setRetentionFilter] = useState("all");
+  const [sortKey, setSortKey] = useState("trained");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
+  const [exportNotice, setExportNotice] = useState<{ tone: "ok" | "err"; text: string } | null>(null);
   const [dataSource, setDataSource] = useState<DataSourceState>({
     source: "demo",
     lastUpdated: data.overview.updated_at,
     message: "Complete illustrative state dataset is active while the backend is offline.",
   });
 
+  const periodParam = period === "Last 3 months" ? "3m" : period === "Last 6 months" ? "6m" : period === "Last 12 months" ? "12m" : undefined;
+
+  // Crash-proof skill-gap access: never read sectors[0] without checking.
+  const sectorSummaries = useMemo(() => getSkillGapSectors(data), [data]);
+  const sector = sectorSummaries.find((item) => item.sector === skillSector) ?? sectorSummaries[0] ?? null;
+  const activeSectorName = sector?.sector ?? "";
+
+  useEffect(() => {
+    if (!skillSector && sectorSummaries.length > 0) {
+      setSkillSector(sectorSummaries[0].sector);
+    }
+  }, [skillSector, sectorSummaries]);
+
   useEffect(() => {
     if (!token || isDemoSession || token.startsWith("demo-")) return;
     let active = true;
     api
-      .getDashboard({ district: districtId === "all" ? undefined : districtId, period: period === "Last 6 months" ? "6m" : period === "Last 12 months" ? "12m" : undefined }, token)
+      .getDashboard({ district: districtId === "all" ? undefined : districtId, period: periodParam, startDate: fromDate || undefined, endDate: toDate || undefined }, token)
       .then((response) => {
         if (!active) return;
         setData(response);
         setDataSource({ source: "live", lastUpdated: response.overview.updated_at });
-        setSkillSector((current) => response["skill-gaps"].sectors.some((item) => item.sector === current) ? current : response["skill-gaps"].sectors[0]?.sector ?? "");
+        const sectors = getSkillGapSectors(response);
+        setSkillSector((current) =>
+          sectors.some((item) => item.sector === current) ? current : (sectors[0]?.sector ?? ""),
+        );
       })
       .catch(() => {
         if (active) {
@@ -87,7 +121,7 @@ export function GovernmentDashboard() {
     return () => {
       active = false;
     };
-  }, [districtId, period, token, isDemoSession]);
+  }, [districtId, periodParam, fromDate, toDate, token, isDemoSession]);
 
   const selectedDistrict = districtId === "all" ? null : data.districts.find((district) => district.id === districtId) ?? null;
   const activeDistrict = selectedDistrict ?? data.districts.find((district) => district.id === "pune") ?? data.districts[0];
@@ -96,12 +130,10 @@ export function GovernmentDashboard() {
       return {
         trained: data.overview.total_trained,
         placed: data.overview.total_placed,
-        employed: dataSource.source === "live"
-          ? Math.round(data.overview.total_placed * (data.overview.employed_rate / 100))
-          : 72114,
+        employed: Math.round(data.overview.total_placed * (data.overview.employed_rate / 100)),
         employedRate: data.overview.employed_rate,
         retention: data.overview.retention_6m_rate,
-        wage: data.overview.median_monthly_wage ?? 18500,
+        wage: data.overview.median_monthly_wage ?? 0,
       };
     }
     return {
@@ -112,20 +144,140 @@ export function GovernmentDashboard() {
       retention: selectedDistrict.retention_6m_rate,
       wage: selectedDistrict.median_wage ?? 0,
     };
-  }, [data.overview, dataSource.source, selectedDistrict]);
-  const sector = data["skill-gaps"].sectors.find((item) => item.sector === skillSector) ?? data["skill-gaps"].sectors[0];
-  const largestGap = sector?.skills.reduce((largest, skill) => (skill.gap > largest.gap ? skill : largest), sector.skills[0]);
+  }, [data.overview, selectedDistrict]);
+  const largestGap = sector
+    ? [...sector.skills].sort((a, b) => b.gap - a.gap || b.demand - a.demand)[0] ?? null
+    : null;
+  const highRiskDistricts = useMemo(
+    () => data.districts.filter((district) => district.risk_level === "high"),
+    [data.districts],
+  );
+  const totalPending = data.overview.pending_verification ?? 0;
 
-  const exportReport = () => {
-    const headings = ["District", "Trained", "Placed", "Employment Rate", "6M Retention", "Self Employment", "Median Wage"];
-    const rows = data.districts.map((district) => [district.name, district.trained, district.placed, `${district.employed_rate}%`, `${district.retention_6m_rate}%`, `${district.self_employment_rate}%`, district.median_wage]);
-    const csv = [headings, ...rows].map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")).join("\n");
-    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
+  const comparisonRows = useMemo(() => {
+    const filtered = data.districts.filter((district) => {
+      if (riskFilter !== "all" && district.risk_level !== riskFilter) return false;
+      if (employmentFilter !== "all" && district.employed_rate < Number(employmentFilter)) return false;
+      if (retentionFilter !== "all" && district.retention_6m_rate < Number(retentionFilter)) return false;
+      return true;
+    });
+    const valueOf = (district: DistrictOutcome) => {
+      switch (sortKey) {
+        case "placed": return district.placed;
+        case "employment": return district.employed_rate;
+        case "retention": return district.retention_6m_rate;
+        case "wage": return district.median_wage ?? -1;
+        default: return district.trained;
+      }
+    };
+    return [...filtered].sort((a, b) => {
+      const diff = valueOf(a) - valueOf(b);
+      return sortDir === "asc" ? diff : -diff;
+    });
+  }, [data.districts, riskFilter, employmentFilter, retentionFilter, sortKey, sortDir]);
+
+  const toggleSort = (key: string) => {
+    if (sortKey === key) {
+      setSortDir((dir) => (dir === "asc" ? "desc" : "asc"));
+    } else {
+      setSortKey(key);
+      setSortDir("desc");
+    }
+  };
+
+  const interventions = useMemo(() => {
+    const items: string[] = [];
+    const topGap = sectorSummaries
+      .flatMap((item) => item.skills.map((skill) => ({ ...skill, sector: item.sector })))
+      .sort((a, b) => b.gap - a.gap || b.demand - a.demand)[0];
+    if (topGap) {
+      items.push(
+        `Increase ${topGap.sector} training capacity for "${topGap.skill}" (demand ${topGap.demand}, supply ${topGap.supply}).`,
+      );
+    }
+    if (totalPending > 0) {
+      items.push(
+        `Prioritize employer outreach: ${formatIndianNumber(totalPending)} outcome${totalPending === 1 ? "" : "s"} awaiting verification.`,
+      );
+    }
+    if (highRiskDistricts.length > 0) {
+      items.push(
+        `Monitor low-retention districts: ${highRiskDistricts.map((d) => d.name).join(", ")}.`,
+      );
+    }
+    const lowRetention = data.districts.filter((d) => d.retention_6m_rate < 62);
+    if (lowRetention.length > 0) {
+      items.push(
+        `Launch targeted re-skilling where 6M retention trails below 62% (${lowRetention.map((d) => d.name).slice(0, 3).join(", ")}).`,
+      );
+    }
+    items.push("Increase apprenticeship and employer partnerships to convert placements into retained employment.");
+    return items;
+  }, [sectorSummaries, totalPending, highRiskDistricts, data.districts]);
+
+  const [exporting, setExporting] = useState<"csv" | "pdf" | null>(null);
+
+  // Reporting lens: outcomes ranks districts by employment, verification lens
+  // ranks by six-month retention risk (lowest retention first).
+  const visibleDistricts = useMemo(() => {
+    const query = districtQuery.trim().toLowerCase();
+    const filtered = query
+      ? data.districts.filter((district) => district.name.toLowerCase().includes(query))
+      : [...data.districts];
+    filtered.sort((a, b) => lens === "verification"
+      ? a.retention_6m_rate - b.retention_6m_rate
+      : b.employed_rate - a.employed_rate);
+    return filtered;
+  }, [data.districts, districtQuery, lens]);
+
+  const downloadBlob = (blob: Blob, filename: string) => {
+    const url = URL.createObjectURL(blob);
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = "skilltrace-maharashtra-outcome-report.csv";
+    anchor.download = filename;
+    document.body.appendChild(anchor);
     anchor.click();
+    anchor.remove();
     URL.revokeObjectURL(url);
+  };
+
+  const exportParams = () => ({
+    district: districtId === "all" ? undefined : activeDistrict?.name ?? districtId,
+    period: periodParam,
+    startDate: fromDate || undefined,
+    endDate: toDate || undefined,
+    lens,
+  });
+
+  const exportReport = async (format: "csv" | "pdf") => {
+    if (exporting) return;
+    setExporting(format);
+    setExportNotice(null);
+    const stamp = new Date().toISOString().slice(0, 10);
+    try {
+      const isLive = token && !token.startsWith("demo-");
+      if (isLive) {
+        const { blob, filename } = await api.exportReport({ ...exportParams(), format }, token);
+        downloadBlob(blob, filename || `skilltrace_outcome_report_${stamp}.${format}`);
+      } else {
+        // Demo/offline snapshot of the currently displayed dataset.
+        if (format === "pdf") {
+          throw new Error("PDF export needs the live backend. Sign in as government admin.");
+        }
+        const headings = ["District", "Trained", "Placed", "Employment Rate", "6M Retention", "Self Employment", "Median Wage"];
+        const rows = visibleDistricts.map((district) => [district.name, district.trained, district.placed, `${district.employed_rate}%`, `${district.retention_6m_rate}%`, `${district.self_employment_rate}%`, district.median_wage]);
+        const csv = [headings, ...rows].map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(",")).join("\n");
+        downloadBlob(new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8" }), `skilltrace_outcome_report_${stamp}.csv`);
+      }
+      setExportNotice({ tone: "ok", text: `${format.toUpperCase()} report downloaded with the current filters.` });
+    } catch (caught) {
+      setExportNotice({
+        tone: "err",
+        text: caught instanceof Error ? caught.message : "Export failed. Please try again.",
+      });
+    } finally {
+      setExporting(null);
+    }
   };
 
   return (
@@ -137,11 +289,12 @@ export function GovernmentDashboard() {
         headerActions={
           <div className="hidden items-center gap-3 lg:flex">
             <DataSourceIndicator state={dataSource} />
-            <Button onClick={exportReport}><ArrowDownToLine className="size-4" /> Export report</Button>
+            <Button onClick={() => void exportReport("csv")} disabled={exporting !== null}><ArrowDownToLine className="size-4" /> {exporting === "csv" ? "Exporting CSV…" : "Export CSV"}</Button>
+            <Button onClick={() => void exportReport("pdf")} disabled={exporting !== null} variant="secondary"><ArrowDownToLine className="size-4" /> {exporting === "pdf" ? "Exporting PDF…" : "Export PDF"}</Button>
           </div>
         }
       >
-      <section className="flex flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
+      <section id="reports" className="flex scroll-mt-24 flex-col gap-5 xl:flex-row xl:items-end xl:justify-between">
         <div>
           <div className="flex flex-wrap items-center gap-2">
             <Badge tone="blue" dot>Maharashtra</Badge>
@@ -150,7 +303,20 @@ export function GovernmentDashboard() {
           <h1 className="mt-4 text-2xl font-extrabold tracking-[-0.04em] text-navy-900 sm:text-3xl">Outcome intelligence for every district.</h1>
           <p className="mt-2 max-w-2xl text-xs leading-6 text-navy-500 sm:text-sm">Track how training becomes placement, retention and wage growth—and use skill-gap signals to improve the next cohort.</p>
         </div>
-        <Button onClick={exportReport} className="w-fit xl:hidden"><ArrowDownToLine className="size-4" /> Export report</Button>
+        <div className="flex flex-col gap-3 sm:flex-row xl:hidden">
+          <Button onClick={() => void exportReport("csv")} disabled={exporting !== null} className="w-fit"><ArrowDownToLine className="size-4" /> {exporting === "csv" ? "Exporting CSV…" : "Export CSV"}</Button>
+          <Button onClick={() => void exportReport("pdf")} disabled={exporting !== null} variant="secondary" className="w-fit"><ArrowDownToLine className="size-4" /> {exporting === "pdf" ? "Exporting PDF…" : "Export PDF"}</Button>
+        </div>
+        {exportNotice && (
+          <p
+            role="status"
+            className={exportNotice.tone === "ok"
+              ? "mt-3 w-fit rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11px] font-bold text-emerald-800"
+              : "mt-3 w-fit rounded-xl border border-red-200 bg-red-50 px-3 py-2 text-[11px] font-bold text-red-700"}
+          >
+            {exportNotice.text}
+          </p>
+        )}
       </section>
 
       <Card className="mt-5 p-4 sm:p-5">
@@ -173,12 +339,12 @@ export function GovernmentDashboard() {
             <label>
               <span className="text-[9px] font-extrabold uppercase tracking-[0.12em] text-navy-400">Period</span>
               <select value={period} onChange={(event) => setPeriod(event.target.value)} className="mt-1.5 h-11 w-full rounded-xl border border-navy-200 bg-white px-3 text-xs font-bold text-navy-800 outline-none transition focus:border-primary-500 focus:ring-4 focus:ring-primary-500/10">
-                <option>Last 6 months</option><option>Last 12 months</option><option>Current cohort</option>
+                <option>Last 3 months</option><option>Last 6 months</option><option>Last 12 months</option><option>Current cohort</option>
               </select>
             </label>
             <label>
               <span className="text-[9px] font-extrabold uppercase tracking-[0.12em] text-navy-400">Reporting lens</span>
-              <select className="mt-1.5 h-11 w-full rounded-xl border border-navy-200 bg-white px-3 text-xs font-bold text-navy-800 outline-none transition focus:border-primary-500 focus:ring-4 focus:ring-primary-500/10" defaultValue="outcomes" aria-label="Reporting lens">
+              <select value={lens} onChange={(event) => setLens(event.target.value)} className="mt-1.5 h-11 w-full rounded-xl border border-navy-200 bg-white px-3 text-xs font-bold text-navy-800 outline-none transition focus:border-primary-500 focus:ring-4 focus:ring-primary-500/10" aria-label="Reporting lens">
                 <option value="outcomes">Outcome outcomes</option>
                 <option value="verification">Verification quality</option>
               </select>
@@ -205,6 +371,13 @@ export function GovernmentDashboard() {
         <StatCard label="Median monthly wage" value={`₹${formatIndianNumber(kpis.wage)}`} detail="Among verified placements" icon={IndianRupee} tone="blue" className="col-span-2 md:col-span-1" />
       </section>
 
+      <section className="mt-3 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
+        <StatCard label="Self-employed" value={formatIndianNumber(data.overview.self_employed ?? 0)} detail="Independent livelihoods" icon={UsersRound} tone="teal" />
+        <StatCard label="Pending verification" value={formatIndianNumber(totalPending)} detail="Awaiting employer confirmation" icon={ListChecks} tone="amber" />
+        <StatCard label="High-risk districts" value={String(highRiskDistricts.length)} detail={highRiskDistricts.length ? highRiskDistricts.map((d) => d.name).slice(0, 3).join(", ") : "No high-risk districts"} icon={AlertTriangle} tone="red" />
+        <StatCard label="Training completed" value={formatIndianNumber(data.overview.training_completed ?? data.overview.total_trained)} detail="Certified completions in scope" icon={CheckCircle2} tone="green" />
+      </section>
+
       <Card id="districts" className="mt-5 overflow-hidden scroll-mt-24">
         <div className="flex flex-col gap-3 border-b border-navy-100 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
           <div className="flex items-center gap-3">
@@ -214,24 +387,26 @@ export function GovernmentDashboard() {
               <h2 className="mt-1 text-lg font-extrabold tracking-tight text-navy-900">Regional outcome pulse</h2>
             </div>
           </div>
-          <Badge tone="neutral">5 representative districts</Badge>
+          <Badge tone="neutral">{data.districts.length} districts in dataset</Badge>
         </div>
         <div className="p-4 sm:p-6">
-          <DistrictMap districts={data.districts} selectedId={activeDistrict?.id ?? "pune"} onSelect={setDistrictId} />
+          <DistrictMap districts={visibleDistricts} selectedId={districtId === "all" ? "all" : (activeDistrict?.id ?? "all")} onSelect={setDistrictId} query={districtQuery} onQueryChange={setDistrictQuery} />
         </div>
         <div className="border-t border-navy-100 bg-soft-slate p-5 sm:p-6">
           <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
             <div>
               <p className="text-[9px] font-extrabold uppercase tracking-[0.13em] text-navy-400">Selected region</p>
-              <h3 className="mt-1 text-lg font-extrabold text-navy-900">{activeDistrict?.name ?? "Pune"}</h3>
+              <h3 className="mt-1 text-lg font-extrabold text-navy-900">{districtId === "all" ? "All Maharashtra" : (activeDistrict?.name ?? "Select a district")}</h3>
               <p className="mt-1 text-[10px] text-navy-500">Representative district metrics shown on the map and table.</p>
             </div>
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 xl:grid-cols-6">
               {[
                 ["Trained", formatIndianNumber(activeDistrict?.trained ?? 0)],
+                ["Placed", formatIndianNumber(activeDistrict?.placed ?? 0)],
                 ["Employment", `${activeDistrict?.employed_rate ?? 0}%`],
                 ["6M retained", `${activeDistrict?.retention_6m_rate ?? 0}%`],
                 ["Self-employed", `${activeDistrict?.self_employment_rate ?? 0}%`],
+                ["Median wage", activeDistrict?.median_wage ? `₹${formatIndianNumber(activeDistrict.median_wage)}` : "No data"],
               ].map(([label, value]) => (
                 <div key={label} className="rounded-xl border border-navy-100 bg-white px-3 py-3">
                   <p className="text-[8px] font-extrabold uppercase tracking-wider text-navy-400">{label}</p>
@@ -240,6 +415,44 @@ export function GovernmentDashboard() {
               ))}
             </div>
           </div>
+          <div className="mt-4 grid gap-2 rounded-2xl border border-navy-100 bg-white p-4 sm:grid-cols-2 xl:grid-cols-4">
+            <div>
+              <p className="text-[8px] font-extrabold uppercase tracking-wider text-navy-400">Verification</p>
+              <p className="mt-1 text-sm font-extrabold text-navy-900">{formatIndianNumber(activeDistrict?.pending_verification ?? 0)} pending</p>
+              <p className="mt-0.5 text-[9px] text-navy-400">{(activeDistrict?.pending_verification ?? 0) > 0 ? "Awaiting employer confirmation" : "Queue clear for this district"}</p>
+            </div>
+            <div>
+              <p className="text-[8px] font-extrabold uppercase tracking-wider text-navy-400">Follow-up due</p>
+              <p className="mt-1 text-sm font-extrabold text-navy-900">{formatIndianNumber(activeDistrict?.followup_due ?? 0)} due</p>
+              <p className="mt-0.5 text-[9px] text-navy-400">Check-ins due within 30 days</p>
+            </div>
+            <div>
+              <p className="text-[8px] font-extrabold uppercase tracking-wider text-navy-400">Outcome risk</p>
+              <p className="mt-1 text-sm font-extrabold capitalize text-navy-900">{activeDistrict?.risk_level ?? "—"}</p>
+              <p className="mt-0.5 text-[9px] text-navy-400">Composite retention, wage & verification signals</p>
+            </div>
+            <div>
+              <p className="text-[8px] font-extrabold uppercase tracking-wider text-navy-400">Top state-wide skill gap</p>
+              <p className="mt-1 text-sm font-extrabold text-navy-900">{sector ? `${sector.topSkill} (${sector.sector})` : "No skill-gap data"}</p>
+              <p className="mt-0.5 text-[9px] text-navy-400">{sector ? `Shortfall of ${sector.gap} against employer demand` : "Available once demand signals load"}</p>
+            </div>
+          </div>
+          {activeDistrict && districtId !== "all" && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Link
+                href={`/dashboard/outreach?tab=trainees&district=${encodeURIComponent(activeDistrict.name)}`}
+                className="inline-flex h-10 items-center gap-1.5 rounded-xl border border-navy-200 bg-white px-4 text-xs font-bold text-navy transition hover:border-primary-300"
+              >
+                View trainees <ArrowDownToLine className="size-3.5 rotate-90" />
+              </Link>
+              <Link
+                href={`/dashboard/outreach?tab=campaigns&district=${encodeURIComponent(activeDistrict.name)}`}
+                className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-primary-600 px-4 text-xs font-bold text-white transition hover:bg-primary-700"
+              >
+                Create follow-up campaign <ArrowDownToLine className="size-3.5 rotate-90" />
+              </Link>
+            </div>
+          )}
           {activeDistrict && (
             <div className="mt-5 flex flex-col gap-3 rounded-2xl border border-saffron/20 bg-saffron-soft/55 p-4 sm:flex-row sm:items-center sm:justify-between">
               <div>
@@ -311,31 +524,58 @@ export function GovernmentDashboard() {
           <ChartTable headers={["Reason", "Count", "Share"]} rows={data.attrition.reasons.map((reason) => [reason.reason, reason.count.toLocaleString("en-IN"), `${reason.percentage}%`])} />
         </Card>
 
-        <Card className="p-5 sm:p-6">
+        <Card id="skill-gaps" className="scroll-mt-24 p-5 sm:p-6">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
             <div>
               <p className="text-[9px] font-extrabold uppercase tracking-[0.14em] text-primary-600">Skill gap intelligence</p>
-              <h2 className="mt-1 text-lg font-extrabold tracking-tight text-navy-900">Trained supply vs. market demand</h2>
-              <p className="mt-1 text-[10px] text-navy-400">Verified skill evidence compared with employer role requirements.</p>
+              <h2 className="mt-1 text-lg font-extrabold tracking-tight text-navy-900">Skill Supply vs Demand</h2>
+              <p className="mt-1 text-[10px] text-navy-400">Trained supply compared with employer demand signals.</p>
+              <Badge tone="neutral" className="mt-2">Illustrative employer demand</Badge>
             </div>
-            <select value={skillSector} onChange={(event) => setSkillSector(event.target.value)} className="h-10 rounded-xl border border-navy-200 bg-white px-3 text-[10px] font-extrabold text-navy-700 outline-none focus:border-primary-500">
-              {data["skill-gaps"].sectors.map((item) => <option key={item.sector}>{item.sector}</option>)}
+            <select
+              value={activeSectorName}
+              onChange={(event) => setSkillSector(event.target.value)}
+              disabled={sectorSummaries.length === 0}
+              className="h-10 rounded-xl border border-navy-200 bg-white px-3 text-[10px] font-extrabold text-navy-700 outline-none focus:border-primary-500 disabled:opacity-50"
+              aria-label="Skill sector"
+            >
+              {sectorSummaries.map((item) => <option key={item.sector} value={item.sector}>{item.sector}</option>)}
             </select>
           </div>
-          <div className="mt-3"><SkillGapBars sector={sector} /></div>
-          <div className="flex items-center gap-3 rounded-xl border border-warning-200 bg-warning-50 p-3.5">
-            <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-warning-500 text-navy-900"><Lightbulb className="size-4" /></div>
-            <div>
-              <p className="text-[10px] font-extrabold text-navy-900">Largest gap: {largestGap?.skill ?? "—"}</p>
-              <p className="mt-0.5 text-[9px] text-navy-500">Supply {largestGap?.supply ?? "—"} vs demand {largestGap?.demand ?? "—"} · {largestGap?.gap ?? 0}-point shortfall</p>
-            </div>
-          </div>
-          <ChartTable headers={["Skill", "Supply", "Demand", "Gap"]} rows={sector.skills.map((skill) => [skill.skill, skill.supply, skill.demand, skill.gap])} />
+          {sector ? (
+            <>
+              <div className="mt-3"><SkillGapBars sector={{ sector: sector.sector, skills: sector.skills }} /></div>
+              <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                {[
+                  ["Sector supply", formatIndianNumber(sector.supply)],
+                  ["Employer demand", formatIndianNumber(sector.demand)],
+                  ["Skill gap", formatIndianNumber(sector.gap)],
+                  ["Gap", `${sector.gapPct}%`],
+                ].map(([label, value]) => (
+                  <div key={label} className="rounded-xl border border-navy-100 bg-soft-slate px-3 py-2.5">
+                    <p className="text-[8px] font-extrabold uppercase tracking-wider text-navy-400">{label}</p>
+                    <p className="mt-0.5 text-sm font-extrabold text-navy-900">{value}</p>
+                  </div>
+                ))}
+              </div>
+              <div className="mt-3 flex items-center gap-3 rounded-xl border border-warning-200 bg-warning-50 p-3.5">
+                <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-warning-500 text-navy-900"><Lightbulb className="size-4" /></div>
+                <div>
+                  <p className="text-[10px] font-extrabold text-navy-900">Largest gap: {largestGap?.skill ?? "—"}</p>
+                  <p className="mt-0.5 text-[9px] text-navy-500">Supply {largestGap?.supply ?? "—"} vs demand {largestGap?.demand ?? "—"} · {largestGap?.gap ?? 0}-point shortfall</p>
+                </div>
+              </div>
+              <ChartTable headers={["Skill", "Supply", "Demand", "Gap"]} rows={sector.skills.map((skill) => [skill.skill, skill.supply, skill.demand, skill.gap])} />
+            </>
+          ) : (
+            <p className="mt-4 rounded-xl border border-dashed border-navy-200 p-6 text-center text-xs font-bold text-navy-500" role="status">
+              No skill-gap data available for the selected filters.
+            </p>
+          )}
         </Card>
       </div>
 
-      <section id="insights" className="mt-5 scroll-mt-24">
-        <Card className="overflow-hidden">
+      <section id="insights" className="mt-5 scroll-mt-24">        <Card className="overflow-hidden">
           <div className="flex flex-col gap-3 border-b border-navy-100 p-5 sm:flex-row sm:items-center sm:justify-between sm:p-6">
             <div className="flex items-center gap-3">
               <div className="grid size-10 place-items-center rounded-xl bg-primary-50 text-primary-700"><BrainCircuit className="size-5" /></div>
@@ -347,7 +587,12 @@ export function GovernmentDashboard() {
             <Badge tone="neutral">Evidence-linked summaries</Badge>
           </div>
           <div className="grid divide-y divide-navy-100 lg:grid-cols-2 lg:divide-x lg:divide-y-0">
-            {data.insights.insights.map((insight) => (
+            {data.insights.insights.map((insight) => {
+              const districtTarget = findDistrictIdByName(data, insight.district);
+              const sectorTarget = sectorSummaries.some((item) => item.sector.toLowerCase() === (insight.sector ?? "").toLowerCase())
+                ? insight.sector
+                : null;
+              return (
               <article key={insight.id} className="p-5 sm:p-6">
                 <div className="flex items-start gap-4">
                   <div className={cn("grid size-10 shrink-0 place-items-center rounded-xl", insight.severity === "opportunity" ? "bg-success-50 text-success-600" : insight.severity === "critical" ? "bg-red-50 text-coral" : "bg-warning-50 text-warning-700")}>
@@ -361,6 +606,28 @@ export function GovernmentDashboard() {
                     <h3 className="mt-3 text-sm font-extrabold leading-6 text-navy-900">{insight.title}</h3>
                     <p className="mt-2 text-[11px] leading-5 text-navy-500">{insight.summary}</p>
                     <Badge tone="neutral" className="mt-3">{insight.metric}</Badge>
+                    {(districtTarget || sectorTarget) && (
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {districtTarget && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => { setDistrictId(districtTarget); scrollToSection("districts"); }}
+                          >
+                            View {insight.district} outcomes <ArrowDownToLine className="size-3 rotate-90" />
+                          </Button>
+                        )}
+                        {sectorTarget && (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => { setSkillSector(sectorTarget as string); scrollToSection("skill-gaps"); }}
+                          >
+                            View {sectorTarget} skill gap <ArrowDownToLine className="size-3 rotate-90" />
+                          </Button>
+                        )}
+                      </div>
+                    )}
                     <details className="group mt-4 rounded-xl border border-navy-100 bg-soft-slate p-4">
                       <summary className="cursor-pointer list-none text-[10px] font-extrabold text-primary-600">Why this insight?</summary>
                       <p className="mt-3 text-[10px] leading-5 text-navy-500"><strong className="text-navy-800">Evidence:</strong> {insight.evidence}</p>
@@ -369,10 +636,148 @@ export function GovernmentDashboard() {
                   </div>
                 </div>
               </article>
-            ))}
+              );
+            })}
           </div>
         </Card>
       </section>
+
+      <Card className="mt-5 overflow-hidden">
+        <div className="flex flex-col gap-3 border-b border-navy-100 p-5 sm:p-6 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center gap-3">
+            <div className="grid size-10 place-items-center rounded-xl bg-primary-50 text-primary-700"><ListChecks className="size-5" /></div>
+            <div>
+              <p className="text-[9px] font-extrabold uppercase tracking-[0.14em] text-primary-600">District comparison</p>
+              <h2 className="mt-1 text-lg font-extrabold tracking-tight text-navy-900">Every district, side by side</h2>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <label>
+              <span className="text-[9px] font-extrabold uppercase tracking-[0.12em] text-navy-400">Risk</span>
+              <select value={riskFilter} onChange={(event) => setRiskFilter(event.target.value)} className="mt-1 h-10 w-full rounded-xl border border-navy-200 bg-white px-2 text-[11px] font-bold text-navy-800 outline-none focus:border-primary-500">
+                <option value="all">All risks</option>
+                <option value="low">Low</option>
+                <option value="moderate">Moderate</option>
+                <option value="high">High</option>
+              </select>
+            </label>
+            <label>
+              <span className="text-[9px] font-extrabold uppercase tracking-[0.12em] text-navy-400">Employment ≥</span>
+              <select value={employmentFilter} onChange={(event) => setEmploymentFilter(event.target.value)} className="mt-1 h-10 w-full rounded-xl border border-navy-200 bg-white px-2 text-[11px] font-bold text-navy-800 outline-none focus:border-primary-500">
+                <option value="all">Any</option>
+                <option value="80">80%</option>
+                <option value="70">70%</option>
+                <option value="60">60%</option>
+              </select>
+            </label>
+            <label>
+              <span className="text-[9px] font-extrabold uppercase tracking-[0.12em] text-navy-400">Retention ≥</span>
+              <select value={retentionFilter} onChange={(event) => setRetentionFilter(event.target.value)} className="mt-1 h-10 w-full rounded-xl border border-navy-200 bg-white px-2 text-[11px] font-bold text-navy-800 outline-none focus:border-primary-500">
+                <option value="all">Any</option>
+                <option value="70">70%</option>
+                <option value="65">65%</option>
+                <option value="60">60%</option>
+              </select>
+            </label>
+            <label>
+              <span className="text-[9px] font-extrabold uppercase tracking-[0.12em] text-navy-400">Sort</span>
+              <select value={`${sortKey}:${sortDir}`} onChange={(event) => { const [key, dir] = event.target.value.split(":"); setSortKey(key); setSortDir(dir as "asc" | "desc"); }} className="mt-1 h-10 w-full rounded-xl border border-navy-200 bg-white px-2 text-[11px] font-bold text-navy-800 outline-none focus:border-primary-500">
+                <option value="trained:desc">Trained ↓</option>
+                <option value="placed:desc">Placed ↓</option>
+                <option value="employment:desc">Employment ↓</option>
+                <option value="retention:desc">Retention ↓</option>
+                <option value="wage:desc">Wage ↓</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        {comparisonRows.length === 0 ? (
+          <p className="p-6 text-center text-xs font-bold text-navy-500" role="status">No records available for the selected filters.</p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[820px] border-collapse text-left">
+              <caption className="sr-only">District comparison with filters</caption>
+              <thead>
+                <tr className="bg-soft-slate text-[8px] font-extrabold uppercase tracking-[0.1em] text-navy-400">
+                  {([["District", null], ["Trained", "trained"], ["Placed", "placed"], ["Employment", "employment"], ["6M Retention", "retention"], ["Self-employed", null], ["Median Wage", "wage"], ["Risk", null]] as Array<[string, string | null]>).map(([label, key]) => (
+                    <th key={label} scope="col" className="px-3 py-3 text-right first:text-left">
+                      {key ? (
+                        <button type="button" onClick={() => toggleSort(key)} className="font-extrabold hover:text-primary-600" aria-label={`Sort by ${label}`}>
+                          {label} {sortKey === key ? (sortDir === "asc" ? "↑" : "↓") : ""}
+                        </button>
+                      ) : label}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-navy-100">
+                {comparisonRows.map((district) => (
+                  <tr
+                    key={district.id}
+                    onClick={() => setDistrictId(district.id)}
+                    tabIndex={0}
+                    onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setDistrictId(district.id); } }}
+                    className={cn("cursor-pointer transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-primary-500", districtId === district.id ? "bg-primary-50" : "hover:bg-soft-slate")}
+                  >
+                    <td className="px-3 py-3 text-[11px] font-extrabold text-navy-900">{district.name}</td>
+                    <td className="px-3 py-3 text-right text-[11px] font-bold text-navy-600">{district.trained.toLocaleString("en-IN")}</td>
+                    <td className="px-3 py-3 text-right text-[11px] font-bold text-navy-600">{district.placed.toLocaleString("en-IN")}</td>
+                    <td className="px-3 py-3 text-right text-[11px] font-extrabold text-navy-800">{district.employed_rate}%</td>
+                    <td className="px-3 py-3 text-right text-[11px] font-extrabold text-navy-800">{district.retention_6m_rate}%</td>
+                    <td className="px-3 py-3 text-right text-[11px] font-bold text-navy-600">{district.self_employment_rate}%</td>
+                    <td className="px-3 py-3 text-right text-[11px] font-bold text-navy-600">{district.median_wage ? `₹${formatIndianNumber(district.median_wage)}` : "—"}</td>
+                    <td className="px-3 py-3 text-right"><Badge tone={district.risk_level === "high" ? "red" : district.risk_level === "moderate" ? "amber" : "green"}>{district.risk_level}</Badge></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Card>
+
+      <div className="mt-5 grid gap-5 xl:grid-cols-2">
+        <Card className="p-5 sm:p-6">
+          <div className="flex items-center gap-3">
+            <div className="grid size-10 place-items-center rounded-xl bg-warning-50 text-warning-700"><Wrench className="size-5" /></div>
+            <div>
+              <p className="text-[9px] font-extrabold uppercase tracking-[0.14em] text-warning-700">Recommended interventions</p>
+              <h2 className="mt-1 text-lg font-extrabold tracking-tight text-navy-900">Where to act next</h2>
+            </div>
+          </div>
+          <Badge tone="neutral" className="mt-3">System-generated recommendations</Badge>
+          <ul className="mt-4 space-y-2.5">
+            {interventions.map((item) => (
+              <li key={item} className="flex items-start gap-2.5 rounded-xl border border-navy-100 bg-soft-slate p-3 text-[11px] leading-5 text-navy-700">
+                <CheckCircle2 className="mt-0.5 size-3.5 shrink-0 text-success-600" /> {item}
+              </li>
+            ))}
+          </ul>
+        </Card>
+
+        <Card className="p-5 sm:p-6">
+          <div className="flex items-center gap-3">
+            <div className="grid size-10 place-items-center rounded-xl bg-primary-50 text-primary-700"><Database className="size-5" /></div>
+            <div>
+              <p className="text-[9px] font-extrabold uppercase tracking-[0.14em] text-primary-600">Data quality & coverage</p>
+              <h2 className="mt-1 text-lg font-extrabold tracking-tight text-navy-900">How complete is the evidence?</h2>
+            </div>
+          </div>
+          <dl className="mt-4 grid grid-cols-2 gap-2">
+            {[
+              ["Districts with data", String(data.districts.length)],
+              ["Records awaiting verification", formatIndianNumber(totalPending)],
+              ["Districts missing wage data", String(data.districts.filter((d) => d.median_wage == null).length)],
+              ["Last data refresh", dataSource.lastUpdated ? new Date(dataSource.lastUpdated).toLocaleDateString("en-IN", { day: "numeric", month: "short" }) : "—"],
+            ].map(([label, value]) => (
+              <div key={label} className="rounded-xl border border-navy-100 p-3">
+                <dt className="text-[8px] font-extrabold uppercase tracking-wider text-navy-400">{label}</dt>
+                <dd className="mt-1 text-sm font-extrabold text-navy-900">{value}</dd>
+              </div>
+            ))}
+          </dl>
+          <p className="mt-3 text-[10px] leading-5 text-navy-500">Per-record consent is enforced by the API: employer queues exclude trainees without consent, and exports contain aggregates only.</p>
+        </Card>
+      </div>
 
       <Card className="mt-5 border-navy-800 bg-navy-900 p-5 text-white sm:p-6">
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">

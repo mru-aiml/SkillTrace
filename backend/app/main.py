@@ -43,6 +43,13 @@ async def lifespan(_: FastAPI):
         from app.db.seed import seed_database
 
         seed_database(engine)
+    # Lightweight local follow-up delivery loop (no Celery/Redis required).
+    try:
+        from app.services.followup_scheduler import start_scheduler_loop
+
+        start_scheduler_loop()
+    except Exception:
+        logger.exception("Could not start follow-up scheduler")
     yield
 
 

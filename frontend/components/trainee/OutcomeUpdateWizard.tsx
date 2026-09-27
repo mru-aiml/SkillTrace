@@ -25,6 +25,8 @@ import { AppShell } from "@/components/layout/AppShell";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
+import { api, ApiError, isOfflineError } from "@/lib/api";
+import { useAuth } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
 type WorkStatus = "working" | "self_employed" | "apprenticeship" | "not_working";
@@ -70,6 +72,7 @@ const steps = [
 const inputClass = "mt-2 h-12 w-full rounded-xl border border-navy-200 bg-white px-3.5 text-sm text-navy-900 outline-none transition placeholder:text-navy-300 focus:border-primary-500 focus:ring-4 focus:ring-primary-500/10";
 
 export function OutcomeUpdateWizard() {
+  const { token } = useAuth();
   const [step, setStep] = useState(1);
   const [status, setStatus] = useState<WorkStatus | "">("");
   const [company, setCompany] = useState("");
@@ -83,6 +86,9 @@ export function OutcomeUpdateWizard() {
   const [proof, setProof] = useState<File | null>(null);
   const [error, setError] = useState("");
   const [submitted, setSubmitted] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [uploadState, setUploadState] = useState<"idle" | "uploading" | "uploaded" | "failed">("idle");
+  const [offlineSaved, setOfflineSaved] = useState(false);
 
   const validate = () => {
     if (step === 1 && !status) {
@@ -109,6 +115,70 @@ export function OutcomeUpdateWizard() {
     return true;
   };
 
+  const salaryMidpoint: Record<Exclude<SalaryRange, "">, number> = {
+    "<15k": 12000,
+    "15k-25k": 20000,
+    "25k-40k": 32000,
+    "40k+": 45000,
+  };
+
+  const submitUpdate = async () => {
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    setError("");
+    setOfflineSaved(false);
+    try {
+      if (proof) setUploadState("uploading");
+      const payload = {
+        status: (status === "working" ? "employed" : status === "not_working" ? "seeking_job" : status) as "employed" | "apprenticeship" | "self_employed" | "seeking_job",
+        organization: status === "self_employed" ? businessName : company || undefined,
+        role: status === "self_employed" ? businessName : role || undefined,
+        start_date: startDate || undefined,
+        monthly_wage: salaryRange ? salaryMidpoint[salaryRange] : undefined,
+        location: undefined,
+        business_type: status === "self_employed" ? businessName : undefined,
+        monthly_revenue: monthlyRevenue ? Number(monthlyRevenue) : undefined,
+        employees_created: employeesCreated !== "" ? Number(employeesCreated) : undefined,
+        exit_reason: status === "not_working" ? unemployedReason : undefined,
+        proof_file: proof,
+      };
+      const isLiveToken = token && !token.startsWith("demo-");
+      if (!isLiveToken) throw new ApiError("offline");
+      await api.submitOutcome(payload, token);
+      setUploadState(proof ? "uploaded" : "idle");
+      try {
+        window.localStorage.setItem("skilltrace.trainee-update.v1", "submitted");
+      } catch {
+        // The update still succeeds when local storage is unavailable.
+      }
+      setSubmitted(true);
+      setStep(4);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (caught) {
+      if (proof) setUploadState("failed");
+      if (caught instanceof ApiError && (isOfflineError(caught) || caught.message === "offline")) {
+        // Graceful offline mode: keep the draft locally and say so explicitly.
+        // Do NOT set the "submitted" flag: the dashboard banner must only
+        // reflect a confirmed backend write.
+        try {
+          window.localStorage.removeItem("skilltrace.trainee-update.v1");
+          window.localStorage.setItem("skilltrace.outcome-draft.v1", JSON.stringify({
+            status, company, role, startDate, salaryRange, businessName,
+            monthlyRevenue, employeesCreated, unemployedReason,
+          }));
+        } catch { /* ignore */ }
+        setOfflineSaved(true);
+        setSubmitted(true);
+        setStep(4);
+        window.scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      }
+      setError(caught instanceof ApiError ? caught.message : "Submission failed. Please check your details and retry.");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const continueStep = () => {
     if (!validate()) return;
     if (step < 3) {
@@ -116,14 +186,7 @@ export function OutcomeUpdateWizard() {
       window.scrollTo({ top: 0, behavior: "smooth" });
       return;
     }
-    try {
-      window.localStorage.setItem("skilltrace.trainee-update.v1", "submitted");
-    } catch {
-      // The update still succeeds when local storage is unavailable.
-    }
-    setSubmitted(true);
-    setStep(4);
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    void submitUpdate();
   };
 
   const previousStep = () => {
@@ -315,7 +378,7 @@ export function OutcomeUpdateWizard() {
                     <div className="w-full max-w-sm">
                       <div className="mx-auto grid size-14 place-items-center rounded-2xl bg-primary-50 text-primary-700"><FileText className="size-6" /></div>
                       <p className="mt-4 truncate text-sm font-extrabold text-navy-900">{proof.name}</p>
-                      <p className="mt-1 text-[10px] text-navy-400">{(proof.size / 1024 / 1024).toFixed(2)} MB · Ready to attach</p>
+                      <p className="mt-1 text-[10px] text-navy-400">{(proof.size / 1024 / 1024).toFixed(2)} MB · {uploadState === "uploading" ? "Uploading…" : uploadState === "uploaded" ? "Uploaded" : uploadState === "failed" ? "Upload failed — will retry on submit" : "Ready to attach"}</p>
                       <Button type="button" variant="ghost" size="sm" className="mt-3 text-red-600" onClick={(event) => { event.preventDefault(); setProof(null); }}><Trash2 className="size-3.5" /> Remove file</Button>
                     </div>
                   ) : (
@@ -343,7 +406,7 @@ export function OutcomeUpdateWizard() {
                   </div>
                   <Badge tone="green" className="mx-auto mt-6" dot>Update complete</Badge>
                   <h2 className="mt-4 text-2xl font-extrabold tracking-tight text-navy-900">Status Updated!</h2>
-                  <p className="mt-3 text-sm leading-6 text-navy-500">Thank you for updating your information. This helps improve training programmes for future students.</p>
+                  <p className="mt-3 text-sm leading-6 text-navy-500">{offlineSaved ? "Backend was unreachable, so your update was saved on this device as DEMO/OFFLINE data. It will sync when you are back online." : "Thank you for updating your information. This helps improve training programmes for future students."}</p>
                   <div className="mt-6 rounded-2xl border border-navy-100 bg-soft-slate p-4 text-left">
                     <div className="flex items-center gap-3">
                       <div className="grid size-9 place-items-center rounded-lg bg-success-50 text-success-600"><ShieldCheck className="size-4" /></div>
@@ -370,8 +433,8 @@ export function OutcomeUpdateWizard() {
             <div className="flex items-center justify-between gap-3 border-t border-navy-100 bg-soft-slate px-5 py-4 sm:px-7">
               <Button variant="ghost" onClick={previousStep} disabled={step === 1}><ArrowLeft className="size-4" /> Back</Button>
               <div className="text-right">
-                <Button onClick={continueStep}>
-                  {step === 3 ? "Submit update" : "Continue"} <ArrowRight className="size-4" />
+                <Button onClick={continueStep} disabled={isSubmitting}>
+                  {isSubmitting ? "Submitting…" : step === 3 ? "Submit update" : "Continue"} <ArrowRight className="size-4" />
                 </Button>
                 <p className="mt-1.5 hidden items-center justify-end gap-1 text-[9px] text-navy-400 sm:flex"><Clock3 className="size-3" /> About 30 seconds</p>
               </div>

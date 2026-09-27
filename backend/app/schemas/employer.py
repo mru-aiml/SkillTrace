@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 class VerificationDecision(StrEnum):
     VERIFIED = "Verified"
     NEEDS_CORRECTION = "Needs Correction"
+    REJECTED = "Rejected"
 
 
 class SkillAlignmentFeedback(BaseModel):
@@ -51,6 +52,7 @@ class VerificationPatch(BaseModel):
                 "VERIFIED": "Verified",
                 "NEEDS_CORRECTION": "Needs Correction",
                 "NEEDS CORRECTION": "Needs Correction",
+                "REJECTED": "Rejected",
             }.get(value.upper(), value)
         return value
 
@@ -92,3 +94,35 @@ class VerificationPatchResponse(BaseModel):
     verified_at: str | None
     employment: dict[str, Any]
     verification_id: UUID
+
+
+class EmployerProfile(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    full_name: str
+    email: str
+    phone: str | None
+    role: str
+    organization_name: str
+    organization_type: str | None
+    registration_number: str | None
+    district: str
+    address: str | None
+    website: str | None
+    is_verified: bool
+
+
+class EmployerProfileUpdate(BaseModel):
+    """Editable employer profile fields. Email, role, registration number
+    and verification status are identity/trust data and can never be
+    changed through this endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    full_name: str | None = Field(default=None, min_length=2, max_length=160)
+    phone: str | None = Field(default=None, max_length=32)
+    organization_name: str | None = Field(default=None, min_length=2, max_length=200)
+    district: str | None = Field(default=None, max_length=100)
+    address: str | None = Field(default=None, max_length=500)
+    website: str | None = Field(default=None, max_length=300)

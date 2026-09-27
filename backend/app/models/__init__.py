@@ -1,11 +1,16 @@
 from app.db.session import Base
 from app.models.entities import (
     AuditLog,
+    AutomationRule,
     Course,
     Employer,
     EmploymentRecord,
     Followup,
     JobPostingDemand,
+    MessageJob,
+    MessageTemplate,
+    MessagingCampaign,
+    Notification,
     Proof,
     Trainee,
     TrainingEnrollment,
@@ -13,10 +18,12 @@ from app.models.entities import (
     VerificationRecord,
 )
 from app.models.enums import (
+    CampaignStatus,
     DemandStatus,
     EmploymentStatus,
     EnrollmentStatus,
     FollowupStatus,
+    MessageStatus,
     OutcomeType,
     ProofStatus,
     UserRole,
@@ -24,7 +31,9 @@ from app.models.enums import (
 
 __all__ = [
     "AuditLog",
+    "AutomationRule",
     "Base",
+    "CampaignStatus",
     "Course",
     "DemandStatus",
     "Employer",
@@ -34,6 +43,11 @@ __all__ = [
     "Followup",
     "FollowupStatus",
     "JobPostingDemand",
+    "MessageJob",
+    "MessageStatus",
+    "MessageTemplate",
+    "MessagingCampaign",
+    "Notification",
     "OutcomeType",
     "Proof",
     "ProofStatus",

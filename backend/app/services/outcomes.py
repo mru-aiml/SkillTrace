@@ -12,6 +12,8 @@ from app.models.base import utc_now
 from app.models.enums import EmploymentStatus, FollowupStatus, OutcomeType, ProofStatus
 from app.schemas.trainee import OutcomeRequest
 from app.services.audit import add_audit_log
+from app.services.notifications.store import notify, notify_admins
+from app.services.whatsapp_templates import SCHEDULE, normalize_phone
 
 
 def _find_matching_employer(db: Session, company_name: str | None) -> Employer | None:
@@ -92,7 +94,14 @@ def _schedule_followup(
     actor_id: UUID,
 ) -> Followup:
     today = datetime.now(UTC).date()
-    interval = 30 if employment.outcome_type == OutcomeType.SEEKING_JOB else 90
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    interval = (
+        settings.followup_seeking_job_days
+        if employment.outcome_type == OutcomeType.SEEKING_JOB
+        else settings.followup_employed_days
+    )
     scheduled_for = today + timedelta(days=interval)
     followup = db.scalar(
         select(Followup)
@@ -119,6 +128,72 @@ def _schedule_followup(
         followup.scheduled_for = scheduled_for
         followup.status = FollowupStatus.SCHEDULED
     return followup
+
+
+def _schedule_whatsapp_followups(
+    db: Session,
+    trainee: Trainee,
+    employment: EmploymentRecord,
+    actor_id: UUID,
+    is_update: bool,
+) -> None:
+    """Schedule 30/60/90-day WhatsApp check-ins for a new outcome.
+
+    Consent-gated: nothing is scheduled unless the trainee opted in to
+    WhatsApp follow-ups AND has a usable phone number. Never schedules on
+    plain outcome edits (prevents duplicate series).
+    """
+    if is_update:
+        return
+    from app.services.messaging import is_builtin_automation_active
+    if not is_builtin_automation_active(db):
+        return
+    if not trainee.whatsapp_followup_consent:
+        return
+    phone = trainee.user.phone if trainee.user else None
+    if normalize_phone(phone) is None:
+        return
+    today = datetime.now(UTC).date()
+    scheduled_any = False
+    for template, days in SCHEDULE:
+        scheduled_for = today + timedelta(days=days)
+        exists = db.scalar(
+            select(Followup)
+            .where(
+                Followup.trainee_id == trainee.id,
+                Followup.employment_id == employment.id,
+                Followup.template == template,
+                Followup.status.in_(
+                    (FollowupStatus.SCHEDULED, FollowupStatus.SENT,
+                     FollowupStatus.DELIVERED, FollowupStatus.RESPONDED)
+                ),
+            )
+            .limit(1)
+        )
+        if exists is not None:
+            continue
+        db.add(Followup(
+            trainee_id=trainee.id,
+            employment_id=employment.id,
+            created_by_id=actor_id,
+            status=FollowupStatus.SCHEDULED,
+            scheduled_for=scheduled_for,
+            contact_method="WHATSAPP",
+            channel="WHATSAPP",
+            template=template,
+            notes=f"WhatsApp {template.replace('_', ' ')} check-in",
+        ))
+        scheduled_any = True
+    db.flush()
+    if scheduled_any:
+        notify(
+            db,
+            trainee.user_id,
+            "followup",
+            "WhatsApp follow-ups scheduled",
+            "30, 60 and 90-day WhatsApp check-ins were scheduled. "
+            "You can opt out anytime from Privacy & consent.",
+        )
 
 
 def save_outcome(
@@ -237,6 +312,34 @@ def save_outcome(
 
     followup = _schedule_followup(db, trainee, employment, actor_id)
     db.flush()
+    _schedule_whatsapp_followups(db, trainee, employment, actor_id, is_update)
+    notify(
+        db,
+        trainee.user_id,
+        "outcome",
+        "Outcome update received",
+        f"Your {employment.outcome_type.value.lower().replace('_', ' ')} update "
+        f"was recorded and is waiting for verification.",
+    )
+    if employment.employer_id is not None:
+        matched = db.get(Employer, employment.employer_id)
+        if matched is not None:
+            notify(
+                db,
+                matched.user_id,
+                "verification",
+                "New outcome to verify",
+                f"{trainee.user.full_name} reported a new outcome at "
+                f"{employment.company_name or matched.organization_name}.",
+            )
+    if not is_update:
+        notify_admins(
+            db,
+            "verification",
+            "Verification backlog increased",
+            f"{trainee.user.full_name} submitted a new outcome for verification. "
+            f"Review pending employer confirmations.",
+        )
     add_audit_log(
         db,
         actor_id=actor_id,

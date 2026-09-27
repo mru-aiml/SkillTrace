@@ -13,6 +13,7 @@ export default async function LoginPage({
   searchParams: Promise<{ role?: string }>;
 }) {
   const { role } = await searchParams;
-  const initialRole: UserRole = role === "employer" || role === "admin" ? role : "trainee";
+  const normalized = role === "government" ? "admin" : role;
+  const initialRole: UserRole = normalized === "employer" || normalized === "admin" ? normalized : "trainee";
   return <LoginExperience initialRole={initialRole} />;
 }

@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/Button";
 import { useAuth } from "@/lib/auth";
 import { demoUsers } from "@/lib/demo-data";
 import type { UserRole } from "@/lib/types";
+import { getDashboardRoute } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const roles: Array<{
@@ -89,27 +90,39 @@ export function LoginExperience({ initialRole = "trainee" }: { initialRole?: Use
   };
 
   const handleSubmit = async (event: FormEvent) => {
+    console.debug("[LOGIN DEBUG] form submit fired");
     event.preventDefault();
+    console.debug("[LOGIN DEBUG] selected role:", role);
+    console.debug("[LOGIN DEBUG] email:", email);
     setLocalError(null);
     if (!email.trim() || !password) {
       setLocalError("Enter both an email address and password.");
       return;
     }
+    console.debug("[LOGIN DEBUG] validation passed");
     try {
-      await login({ email: email.trim(), password, role });
-      router.push(roles.find((item) => item.id === role)?.path ?? "/");
-    } catch {
-      // The auth context exposes a user-facing error state.
+      // The backend JWT determines the role; the UI selector is only a hint.
+      console.debug("[LOGIN DEBUG] calling api.login");
+      const authenticated = await login({ email: email.trim(), password, role });
+      console.debug("[LOGIN DEBUG] api.login returned");
+      console.debug("[LOGIN DEBUG] backend role:", authenticated.role);
+      const destination = getDashboardRoute(authenticated.role);
+      console.debug("[LOGIN DEBUG] redirect destination:", destination);
+      router.push(destination);
+    } catch (caught) {
+      // Surface the backend reason (e.g. "Incorrect email or password").
+      setLocalError(caught instanceof Error ? caught.message : "Unable to sign in. Please try again.");
     }
   };
 
   const quickDemo = async () => {
     setLocalError(null);
     try {
-      await loginAsDemo(role);
-      router.push(roles.find((item) => item.id === role)?.path ?? "/");
-    } catch {
-      // The auth context exposes a user-facing error state.
+      // Real backend login with the seeded demo account for the selected role.
+      const authenticated = await loginAsDemo(role);
+      router.push(getDashboardRoute(authenticated.role));
+    } catch (caught) {
+      setLocalError(caught instanceof Error ? caught.message : "Unable to sign in. Please try again.");
     }
   };
 
@@ -150,8 +163,8 @@ export function LoginExperience({ initialRole = "trainee" }: { initialRole?: Use
             <div className="flex items-center gap-3">
               <div className="grid size-10 place-items-center rounded-xl bg-teal-soft text-teal"><ShieldCheck className="size-5" /></div>
               <div>
-                <p className="text-xs font-bold">Demo-safe authentication</p>
-                <p className="mt-1 text-[10px] leading-4 text-white/40">If the API is offline, valid demo credentials create a local session and keep every workflow functional.</p>
+                <p className="text-xs font-bold">Backend-verified authentication</p>
+                <p className="mt-1 text-[10px] leading-4 text-white/40">Sign-in is validated by the SkillTrace API and your role comes from your account.</p>
               </div>
             </div>
           </div>
@@ -186,6 +199,9 @@ export function LoginExperience({ initialRole = "trainee" }: { initialRole?: Use
                   <p className="text-xs font-bold text-navy">Signed in as {user.name}</p>
                   <p className="mt-0.5 text-[10px] text-navy/45">{isDemoSession ? "Local demo session" : user.email} · {user.role === "admin" ? "Government" : user.role}</p>
                 </div>
+                <Link href={getDashboardRoute(user.role)} className="inline-flex h-9 items-center justify-center gap-1.5 rounded-xl bg-teal px-3.5 text-[11px] font-bold text-white transition hover:bg-[#086a66]">
+                  Open workspace <ArrowRight className="size-3.5" />
+                </Link>
                 <button onClick={logout} className="text-[10px] font-bold text-coral hover:underline">Sign out</button>
               </div>
             )}

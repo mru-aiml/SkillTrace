@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { RoleGuard } from "@/components/layout/AccessControl";
 import { GovernmentDashboard } from "@/components/dashboard/GovernmentDashboard";
 
 export const metadata: Metadata = {
@@ -7,5 +8,10 @@ export const metadata: Metadata = {
 };
 
 export default function DashboardPage() {
-  return <GovernmentDashboard />;
+  return (
+    <>
+      <RoleGuard role="admin" />
+      <GovernmentDashboard />
+    </>
+  );
 }

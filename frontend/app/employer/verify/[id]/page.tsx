@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { RoleGuard } from "@/components/layout/AccessControl";
 import { VerificationPage } from "@/components/employer/VerificationPage";
 
 export const metadata: Metadata = {
@@ -8,5 +9,10 @@ export const metadata: Metadata = {
 
 export default async function VerifyEmploymentPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  return <VerificationPage id={id} />;
+  return (
+    <>
+      <RoleGuard role="employer" />
+      <VerificationPage id={id} />
+    </>
+  );
 }

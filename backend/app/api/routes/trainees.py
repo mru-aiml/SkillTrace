@@ -15,10 +15,14 @@ from app.core.responses import success
 from app.models import EmploymentRecord, Proof, TrainingEnrollment
 from app.models.base import utc_now
 from app.models.enums import FollowupStatus, OutcomeType, ProofStatus
+from app.schemas.messaging import WhatsAppConsentUpdate, WhatsAppNumberUpdate
 from app.schemas.trainee import (
+    ConsentUpdate,
+    FollowupResponse,
     OutcomeRequest,
     OutcomeSummary,
     PassportResponse,
+    ProfileUpdate,
     ProofResponse,
     RetentionMilestone,
     RetentionSummary,
@@ -194,6 +198,10 @@ def get_passport(trainee: CurrentTrainee, db: DbSession):
             longitude=trainee.longitude,
             consent_given=trainee.consent_given,
             data_processing_allowed=trainee.data_processing_allowed,
+            employer_verification_consent=trainee.employer_verification_consent,
+            followup_consent=trainee.followup_consent,
+            email_followup_consent=trainee.email_followup_consent,
+            whatsapp_followup_consent=trainee.whatsapp_followup_consent,
         ),
         training=training_summary,
         current_outcome=OutcomeSummary.model_validate(employment, from_attributes=True)
@@ -244,6 +252,316 @@ def get_passport(trainee: CurrentTrainee, db: DbSession):
         last_updated=last_updated,
     )
     return success(response)
+
+
+@router.patch("/consent", response_model=None)
+def update_consent(
+    payload: ConsentUpdate,
+    request: Request,
+    trainee: CurrentTrainee,
+    db: DbSession,
+):
+    """Save trainee privacy & communication preferences."""
+    for field in (
+        "data_processing_allowed",
+        "consent_given",
+        "employer_verification_consent",
+        "followup_consent",
+        "email_followup_consent",
+        "whatsapp_followup_consent",
+    ):
+        value = getattr(payload, field)
+        if value is not None:
+            setattr(trainee, field, value)
+    if payload.consent_given or payload.data_processing_allowed:
+        trainee.consent_given_at = utc_now()
+        trainee.consent_version = "v1"
+    db.add(trainee)
+    db.flush()
+    if payload.whatsapp_followup_consent is False:
+        from app.services.messaging import revoke_whatsapp_followups
+
+        revoke_whatsapp_followups(db, trainee, trainee.user_id)
+    add_audit_log(
+        db,
+        actor_id=trainee.user_id,
+        action="CONSENT_UPDATED",
+        entity_type="trainee",
+        entity_id=trainee.id,
+        details={k: getattr(trainee, k) for k in (
+            "data_processing_allowed", "consent_given",
+            "employer_verification_consent", "followup_consent",
+            "email_followup_consent", "whatsapp_followup_consent")},
+        ip_address=request.client.host if request.client else None,
+    )
+    db.commit()
+    db.refresh(trainee)
+    return success({
+        "consent_given": trainee.consent_given,
+        "data_processing_allowed": trainee.data_processing_allowed,
+        "employer_verification_consent": trainee.employer_verification_consent,
+        "followup_consent": trainee.followup_consent,
+        "email_followup_consent": trainee.email_followup_consent,
+        "whatsapp_followup_consent": trainee.whatsapp_followup_consent,
+    })
+
+@router.get("/followups", response_model=None)
+def list_my_followups(trainee: CurrentTrainee, db: DbSession):
+    rows = sorted(trainee.followups, key=lambda f: f.scheduled_for, reverse=True)[:50]
+    return success([FollowupResponse.model_validate(r, from_attributes=True) for r in rows])
+
+
+@router.get("/proofs", response_model=None)
+def list_my_proofs(trainee: CurrentTrainee, db: DbSession):
+    proofs = sorted(trainee.proofs, key=lambda p: p.uploaded_at, reverse=True)[:50]
+    return success([ProofResponse.model_validate(p) for p in proofs])
+
+
+@router.post("/followups/demo-message", response_model=None)
+def whatsapp_demo_message(trainee: CurrentTrainee, db: DbSession):
+    """Prepare (never send) a demo WhatsApp follow-up.
+
+    Requires WhatsApp opt-in consent. Returns the rendered template message
+    plus a wa.me click-to-chat link. The response explicitly states nothing
+    was sent; delivery only happens through the scheduler with a real
+    provider configured.
+    """
+    from app.services.notifications.whatsapp import WhatsAppProvider
+    from app.services.whatsapp_templates import (
+        TEMPLATE_30_DAY,
+        normalize_phone,
+        render_template,
+        wa_link,
+    )
+
+    if not trainee.whatsapp_followup_consent:
+        raise HTTPException(
+            status_code=403,
+            detail="WhatsApp follow-ups are not enabled for this account. "
+                   "Opt in from Privacy & consent first.",
+        )
+    digits = normalize_phone(trainee.user.phone if trainee.user else None)
+    if digits is None:
+        raise HTTPException(
+            status_code=422,
+            detail="No valid WhatsApp number on file. Add your phone number "
+                   "in Profile first.",
+        )
+    first_name = (trainee.user.full_name or "trainee").split()[0]
+    message = render_template(TEMPLATE_30_DAY, first_name)
+    status = WhatsAppProvider.provider_status()
+    return success({
+        "to_masked": f"+{digits[:2]}******{digits[-2:]}",
+        "message": message,
+        "wa_link": wa_link(digits, message),
+        "provider": status["provider"],
+        "sent": False,
+        "notice": "Demo message prepared. Nothing was sent. "
+                  "Use Open WhatsApp to continue in your own chat app.",
+    })
+
+
+@router.patch("/profile", response_model=None)
+def update_my_profile(
+    payload: ProfileUpdate,
+    request: Request,
+    trainee: CurrentTrainee,
+    db: DbSession,
+):
+    """Update editable profile fields. Email, role and identifiers are
+    identity and can never be changed here."""
+    user = trainee.user
+    if payload.full_name is not None:
+        user.full_name = payload.full_name.strip()
+    if payload.phone is not None:
+        phone = payload.phone.strip()
+        user.phone = phone or None
+    if payload.district is not None:
+        trainee.district = payload.district.strip()
+    if payload.address is not None:
+        address = payload.address.strip()
+        trainee.address = address or None
+    db.add(user)
+    db.add(trainee)
+    db.flush()
+    add_audit_log(
+        db,
+        actor_id=user.id,
+        action="PROFILE_UPDATED",
+        entity_type="trainee",
+        entity_id=trainee.id,
+        details={k: v for k, v in payload.model_dump().items() if v is not None},
+        ip_address=request.client.host if request.client else None,
+    )
+    db.commit()
+    db.refresh(user)
+    db.refresh(trainee)
+    return success(
+        TraineeProfile(
+            id=trainee.id,
+            full_name=user.full_name,
+            email=user.email,
+            phone=user.phone,
+            internal_identifier=trainee.internal_identifier,
+            district=trainee.district,
+            state=trainee.state,
+            address=trainee.address,
+            latitude=trainee.latitude,
+            longitude=trainee.longitude,
+            consent_given=trainee.consent_given,
+            data_processing_allowed=trainee.data_processing_allowed,
+            employer_verification_consent=trainee.employer_verification_consent,
+            followup_consent=trainee.followup_consent,
+            email_followup_consent=trainee.email_followup_consent,
+            whatsapp_followup_consent=trainee.whatsapp_followup_consent,
+        )
+    )
+
+
+@router.patch("/whatsapp-consent", response_model=None)
+def update_whatsapp_consent(
+    payload: WhatsAppConsentUpdate,
+    request: Request,
+    trainee: CurrentTrainee,
+    db: DbSession,
+):
+    """Dedicated WhatsApp opt-in/out. Revoking cancels all future WhatsApp
+    follow-ups and message jobs; every change is audited."""
+    from app.services.messaging import revoke_whatsapp_followups
+
+    trainee.whatsapp_followup_consent = payload.consent_given
+    if payload.consent_given:
+        trainee.followup_consent = True
+    db.add(trainee)
+    db.flush()
+    cancelled = 0
+    if not payload.consent_given:
+        cancelled = revoke_whatsapp_followups(db, trainee, trainee.user_id)
+    else:
+        add_audit_log(
+            db, actor_id=trainee.user_id, action="WHATSAPP_CONSENT_GRANTED",
+            entity_type="trainee", entity_id=trainee.id,
+            ip_address=request.client.host if request.client else None,
+        )
+    db.commit()
+    db.refresh(trainee)
+    return success({
+        "whatsapp_followup_consent": trainee.whatsapp_followup_consent,
+        "cancelled_future": cancelled,
+    })
+
+
+@router.patch("/whatsapp-number", response_model=None)
+def update_whatsapp_number(
+    payload: WhatsAppNumberUpdate,
+    request: Request,
+    trainee: CurrentTrainee,
+    db: DbSession,
+):
+    """Store/verify the WhatsApp number (same User.phone field the profile
+    uses — no duplicate storage). Rejects unusable numbers."""
+    from app.services.whatsapp_templates import normalize_phone
+
+    digits = normalize_phone(payload.phone)
+    if digits is None:
+        raise HTTPException(
+            status_code=422,
+            detail="That phone number cannot receive WhatsApp messages. "
+                   "Use 7-15 digits, including country code.",
+        )
+    trainee.user.phone = payload.phone.strip()
+    db.add(trainee.user)
+    db.flush()
+    add_audit_log(
+        db, actor_id=trainee.user_id, action="WHATSAPP_NUMBER_UPDATED",
+        entity_type="trainee", entity_id=trainee.id,
+        details={"phone_suffix": digits[-4:]},
+        ip_address=request.client.host if request.client else None,
+    )
+    db.commit()
+    return success({"phone_saved": True, "phone_suffix": digits[-4:]})
+
+
+@router.get("/whatsapp/history", response_model=None)
+def whatsapp_history(trainee: CurrentTrainee, db: DbSession):
+    """Full WhatsApp follow-up history with honest delivery states."""
+    rows = sorted(
+        (f for f in trainee.followups
+         if (f.channel or "") == "WHATSAPP" or f.template),
+        key=lambda f: f.scheduled_for,
+    )
+
+    def display(item) -> str:
+        provider_id = item.provider_message_id or ""
+        if provider_id.startswith("sim-") or provider_id.startswith("mock-"):
+            return "SIMULATED"
+        return item.status.value if hasattr(item.status, "value") else str(item.status)
+
+    return success([{
+        "id": item.id,
+        "scheduled_for": item.scheduled_for.isoformat(),
+        "template": item.template,
+        "status": item.status.value if hasattr(item.status, "value") else str(item.status),
+        "display_status": display(item),
+        "sent_at": item.sent_at.isoformat() if item.sent_at else None,
+        "delivered_at": item.delivered_at.isoformat() if item.delivered_at else None,
+        "response": item.response,
+        "responded_at": item.responded_at.isoformat() if item.responded_at else None,
+    } for item in rows])
+
+
+@router.post("/followups/demo-send", response_model=None)
+def whatsapp_demo_send(trainee: CurrentTrainee, db: DbSession):
+    """Automated demo send: creates an immediate WhatsApp follow-up and runs
+    it through the real queue worker. In demo mode the persisted status is
+    SIMULATED (never falsely Delivered); with real credentials it delivers."""
+    from app.models import Followup
+    from app.models.enums import FollowupStatus
+    from app.models.base import utc_now
+    from app.services.messaging import process_message_jobs
+    from app.services.whatsapp_templates import TEMPLATE_30_DAY, normalize_phone
+
+    if not trainee.whatsapp_followup_consent:
+        raise HTTPException(
+            status_code=403,
+            detail="Enable WhatsApp follow-ups first (consent required).",
+        )
+    digits = normalize_phone(trainee.user.phone if trainee.user else None)
+    if digits is None:
+        raise HTTPException(
+            status_code=422,
+            detail="No valid WhatsApp number on file. Update your number first.",
+        )
+    row = Followup(
+        trainee_id=trainee.id,
+        employment_id=None,
+        created_by_id=trainee.user_id,
+        status=FollowupStatus.SCHEDULED,
+        scheduled_for=utc_now().date(),
+        contact_method="WHATSAPP",
+        channel="WHATSAPP",
+        template=TEMPLATE_30_DAY,
+        notes="Demo automated send from trainee dashboard",
+    )
+    db.add(row)
+    db.flush()
+    # Process through the same worker path as scheduled jobs.
+    from app.services.messaging import _send_job
+
+    _send_job(db, row)
+    db.commit()
+    db.refresh(row)
+    provider_id = row.provider_message_id or ""
+    simulated = provider_id.startswith("sim-") or provider_id.startswith("mock-")
+    return success({
+        "followup_id": row.id,
+        "status": "SIMULATED" if simulated else row.status.value,
+        "simulated": simulated,
+        "sent": True,
+        "notice": "Demo send executed through the queue worker. "
+                  + ("Status SIMULATED: no real message left the server."
+                     if simulated else "Handed to the configured provider."),
+    })
 
 
 def _save_outcome(

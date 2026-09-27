@@ -39,10 +39,38 @@ class ProofStatus(StrEnum):
 
 class FollowupStatus(StrEnum):
     SCHEDULED = "SCHEDULED"
+    SENT = "SENT"
+    DELIVERED = "DELIVERED"
+    RESPONDED = "RESPONDED"
+    FAILED = "FAILED"
     COMPLETED = "COMPLETED"
     CANCELLED = "CANCELLED"
+
+
+class FollowupChannel(StrEnum):
+    EMAIL = "EMAIL"
+    WHATSAPP = "WHATSAPP"
+    PHONE = "PHONE"
 
 
 class DemandStatus(StrEnum):
     ACTIVE = "ACTIVE"
     CLOSED = "CLOSED"
+
+
+class MessageStatus(StrEnum):
+    QUEUED = "QUEUED"
+    PROCESSING = "PROCESSING"
+    SENT = "SENT"
+    DELIVERED = "DELIVERED"
+    READ = "READ"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class CampaignStatus(StrEnum):
+    DRAFT = "DRAFT"
+    SCHEDULED = "SCHEDULED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    CANCELLED = "CANCELLED"

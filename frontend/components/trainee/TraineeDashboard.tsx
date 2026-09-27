@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
   ArrowRight,
@@ -24,11 +25,11 @@ import {
   UserRoundCheck,
 } from "lucide-react";
 import { AppShell } from "@/components/layout/AppShell";
-import { OutcomeWizard } from "@/components/trainee/OutcomeWizard";
 import { Badge } from "@/components/ui/Badge";
 import { Button } from "@/components/ui/Button";
 import { Card } from "@/components/ui/Card";
 import { DataSourceIndicator } from "@/components/ui/DataSourceIndicator";
+import { WhatsAppFollowup } from "@/components/trainee/WhatsAppFollowup";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { demoTraineeProfile } from "@/lib/demo-data";
@@ -37,18 +38,23 @@ import { formatDate, getInitials } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 
 const journeySteps = [
-  { label: "Enrolled", date: "Jun 2025", icon: GraduationCap },
-  { label: "Training Completed", date: "Aug 2025", icon: BookIcon },
-  { label: "Certified", date: "23 Aug 2025", icon: Award },
-  { label: "Placed", date: "Aug 2025", icon: BriefcaseBusiness },
-  { label: "Currently Employed", date: "Update required", icon: UserRoundCheck },
+  { label: "Enrolled", date: "—", icon: GraduationCap },
+  { label: "Training Completed", date: "—", icon: BookIcon },
+  { label: "Assessed & Certified", date: "", icon: Award },
+  { label: "Placed", date: "", icon: BriefcaseBusiness },
+  { label: "Follow-up & Retention", date: "Update required", icon: UserRoundCheck },
 ];
 
 function BookIcon(props: React.ComponentProps<typeof GraduationCap>) {
   return <FileBadge {...props} />;
 }
 
-function JourneyStepper() {
+function JourneyStepper({ certifiedDate, placedDate }: { certifiedDate: string; placedDate: string }) {
+  const steps = journeySteps.map((step) => {
+    if (step.label === "Assessed & Certified") return { ...step, date: certifiedDate };
+    if (step.label === "Placed") return { ...step, date: placedDate };
+    return step;
+  });
   return (
     <Card className="overflow-hidden">
       <div className="flex flex-col gap-2 border-b border-navy-100 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
@@ -62,8 +68,8 @@ function JourneyStepper() {
         <div className="relative flex min-w-[720px] items-start justify-between">
           <div className="absolute left-10 right-10 top-5 h-0.5 bg-navy-100" aria-hidden="true" />
           <div className="absolute left-10 top-5 h-0.5 w-[calc(75%-1.25rem)] bg-primary-600" aria-hidden="true" />
-          {journeySteps.map((step, index) => {
-            const current = index === journeySteps.length - 1;
+          {steps.map((step, index) => {
+            const current = index === steps.length - 1;
             return (
               <div key={step.label} className="relative z-10 flex w-32 flex-col items-center text-center">
                 <div
@@ -120,7 +126,10 @@ export function TraineeDashboard() {
   const { token, isDemoSession } = useAuth();
   const [profile, setProfile] = useState<TraineeProfile>(demoTraineeProfile);
   const [updateSubmitted, setUpdateSubmitted] = useState(false);
-  const [wizardOpen, setWizardOpen] = useState(false);
+  const [followups, setFollowups] = useState<import("@/lib/types").ApiFollowup[]>([]);
+  const [consent, setConsent] = useState<import("@/lib/types").ConsentPreferences | null>(null);
+  const [consentSaving, setConsentSaving] = useState(false);
+  const [consentMessage, setConsentMessage] = useState("");
   const [dataSource, setDataSource] = useState<DataSourceState>({
     source: "demo",
     lastUpdated: demoTraineeProfile.updated_at,
@@ -154,51 +163,70 @@ export function TraineeDashboard() {
           });
         }
       });
+    api
+      .getTraineePassport(token)
+      .then((passport) => {
+        if (!active) return;
+        setConsent({
+          data_processing_allowed: passport.trainee.data_processing_allowed,
+          consent_given: passport.trainee.consent_given,
+          employer_verification_consent: passport.trainee.employer_verification_consent ?? false,
+          followup_consent: passport.trainee.followup_consent ?? false,
+          email_followup_consent: passport.trainee.email_followup_consent ?? false,
+          whatsapp_followup_consent: passport.trainee.whatsapp_followup_consent ?? false,
+        });
+      })
+      .catch(() => { /* consent stays null -> demo copy */ });
+    api
+      .getMyFollowups(token)
+      .then((rows) => { if (active) setFollowups(rows); })
+      .catch(() => { /* empty state handled below */ });
     return () => {
       active = false;
     };
   }, [token, isDemoSession]);
 
-  const completeUpdate = (
-    form: { status: string; organization?: string; role?: string; location?: string; start_date?: string; monthly_wage?: number },
-    result: { update_id: string; submitted_at: string },
-  ) => {
-    setUpdateSubmitted(true);
-    window.localStorage.setItem("skilltrace.trainee-update.v1", "submitted");
-    setProfile((current) => {
-      const next: TraineeProfile = {
-        ...current,
-        updated_at: result.submitted_at,
-        activity: [
-          {
-            id: result.update_id,
-            title: "Outcome update submitted",
-            detail: "Your latest work status is waiting for authorised verification.",
-            timestamp: result.submitted_at,
-            type: "update",
-          },
-          ...current.activity,
-        ],
-      };
-      if (form.status === "employed" || form.status === "apprenticeship") {
-        next.employment = {
-          type: form.status as "employed" | "apprenticeship",
-          role: form.role ?? current.employment.role,
-          employer: form.organization ?? current.employment.employer,
-          location: form.location ?? current.employment.location,
-          start_date: form.start_date ?? current.employment.start_date,
-        };
-        if (form.monthly_wage) next.current_wage = form.monthly_wage;
-      } else {
-        next.employment = { ...current.employment, type: form.status as TraineeProfile["employment"]["type"] };
-      }
-      return next;
-    });
+  const saveConsent = async (next: import("@/lib/types").ConsentPreferences) => {
+    setConsent(next);
+    if (!token || token.startsWith("demo-")) {
+      setConsentMessage("Demo mode — preferences saved on this device only.");
+      return;
+    }
+    setConsentSaving(true);
+    setConsentMessage("");
+    try {
+      await api.updateConsent(next, token);
+      setConsentMessage("Preferences saved.");
+    } catch {
+      setConsentMessage("Could not save preferences. Please retry.");
+    } finally {
+      setConsentSaving(false);
+    }
   };
 
   const wageGrowth = profile.starting_wage
     ? Math.round(((profile.current_wage - profile.starting_wage) / profile.starting_wage) * 100)
     : 0;
+  // Progress bar benchmark: 150% of starting wage. Derived from live wages,
+  // not a fixed width.
+  const wageBenchmark = Math.max(profile.starting_wage * 1.5, profile.current_wage, 1);
+  const wageBarWidth = Math.min(100, Math.max(8, Math.round((profile.current_wage / wageBenchmark) * 100)));
+  const firstName = profile.name.split(" ")[0] || profile.name;
+  const certifiedDate = profile.certificate.issued_at
+    ? formatDate(profile.certificate.issued_at, { month: "short", year: "numeric" })
+    : "Pending";
+  const placedDate = profile.employment.start_date
+    ? formatDate(profile.employment.start_date, { month: "short", year: "numeric" })
+    : "Update required";
+  const extraSkills = profile.skill_relevance.role_skills
+    .filter((skill) => !profile.skill_relevance.matched_skills.includes(skill))
+    .slice(0, 2);
+  const milestonePresentation = (status: string) => {
+    if (status === "RETAINED") return { label: "Completed", tone: "green" as const };
+    if (status === "IN_PROGRESS") return { label: "In progress", tone: "amber" as const };
+    if (status === "EXITED") return { label: "Exited", tone: "amber" as const };
+    return { label: "Upcoming", tone: "neutral" as const };
+  };
 
   return (
     <>
@@ -219,7 +247,7 @@ export function TraineeDashboard() {
             {getInitials(profile.name)}
           </div>
           <div>
-            <p className="text-[10px] font-extrabold uppercase tracking-[0.13em] text-primary-600">Namaste, Rahul</p>
+            <p className="text-[10px] font-extrabold uppercase tracking-[0.13em] text-primary-600">Namaste, {firstName}</p>
             <h1 className="mt-0.5 text-xl font-extrabold tracking-[-0.035em] text-navy-900 sm:text-2xl">{profile.name}</h1>
             <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-navy-500">
               <span className="font-mono">{profile.internal_identifier}</span>
@@ -257,10 +285,10 @@ export function TraineeDashboard() {
       </section>
 
       <div className="mt-5">
-        <JourneyStepper />
+        <JourneyStepper certifiedDate={certifiedDate} placedDate={placedDate} />
       </div>
 
-      <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.55fr)_minmax(300px,.65fr)]">
+      <div className="mt-5 grid items-start gap-5 xl:grid-cols-[minmax(0,1.75fr)_minmax(300px,1fr)]">
         <div className="min-w-0 space-y-5">
           <Card className="overflow-hidden">
             <div className="relative overflow-hidden bg-navy-900 px-5 py-5 text-white sm:px-6">
@@ -325,7 +353,7 @@ export function TraineeDashboard() {
                     <span>Start ₹{profile.starting_wage.toLocaleString("en-IN")}</span><span>Current</span>
                   </div>
                   <div className="mt-3 flex h-1.5 gap-1 overflow-hidden rounded-full bg-navy-100">
-                    <div className="w-[73%] rounded-full bg-primary-500" />
+                    <div className="rounded-full bg-primary-500" style={{ width: `${wageBarWidth}%` }} />
                   </div>
                 </div>
 
@@ -357,15 +385,15 @@ export function TraineeDashboard() {
                       <Check className="size-3" /> {skill}
                     </span>
                   ))}
-                  <span className="rounded-lg border border-dashed border-navy-200 px-2.5 py-1.5 text-[10px] font-semibold text-navy-400">+ Preventive Maintenance</span>
+                  {extraSkills.map((skill) => (
+                    <span key={skill} className="rounded-lg border border-dashed border-navy-200 px-2.5 py-1.5 text-[10px] font-semibold text-navy-400">+ {skill}</span>
+                  ))}
                 </div>
               </div>
             </div>
           </Card>
-        </div>
 
-        <aside className="space-y-5">
-          <Card className="overflow-hidden">
+          <Card className="overflow-hidden" aria-label="Retention milestones">
             <div className="bg-primary-50 p-5">
               <div className="flex items-start justify-between gap-3">
                 <div className="grid size-10 place-items-center rounded-xl bg-primary-600 text-white"><CalendarCheck2 className="size-5" /></div>
@@ -374,24 +402,55 @@ export function TraineeDashboard() {
               <h3 className="mt-5 text-base font-extrabold tracking-tight text-navy-900">Retention milestones</h3>
               <p className="mt-1 text-xs leading-5 text-navy-500">Employment confirmed with your employer.</p>
             </div>
-            <div className="space-y-3 p-5">
-              {[
-                ["3M", "Completed", "Nov 2025"],
-                ["6M", "Completed", "Feb 2026"],
-                ["12M", "Completed", "Aug 2026"],
-              ].map(([period, label, date]) => (
-                <div key={period} className="flex items-center gap-3 rounded-xl border border-navy-100 p-3">
-                  <div className="grid size-8 place-items-center rounded-lg bg-emerald-50 text-success-600"><Check className="size-4" /></div>
-                  <div className="min-w-0 flex-1">
-                    <p className="text-xs font-extrabold text-navy-900">{period} retention</p>
-                    <p className="mt-0.5 text-[9px] text-navy-400">{label} · {date}</p>
+            <div className="grid gap-3 p-5 sm:grid-cols-3">
+              {profile.milestones.map((milestone) => {
+                const presentation = milestonePresentation(milestone.status);
+                const done = milestone.status === "RETAINED";
+                return (
+                  <div key={milestone.label} className="flex items-center gap-3 rounded-xl border border-navy-100 p-3">
+                    <div className={cn("grid size-8 shrink-0 place-items-center rounded-lg", done ? "bg-emerald-50 text-success-600" : "bg-soft-slate text-navy-400")}>
+                      {done ? <Check className="size-4" /> : <Clock3 className="size-4" />}
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <p className="text-xs font-extrabold text-navy-900">{milestone.label} retention</p>
+                      <p className="mt-0.5 text-[9px] text-navy-400">
+                        {presentation.label}{milestone.due_date ? ` · ${formatDate(milestone.due_date, { month: "short", year: "numeric" })}` : ""}
+                      </p>
+                    </div>
+                    <Badge tone={presentation.tone}>{done ? "✓" : presentation.label}</Badge>
                   </div>
-                  <Badge tone="green">✓</Badge>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </Card>
 
+          <section id="recent-activity" aria-labelledby="recent-activity-title">
+            <Card className="overflow-hidden">
+              <div className="flex items-center justify-between border-b border-navy-100 px-5 py-4 sm:px-6">
+                <div>
+                  <p className="text-[9px] font-extrabold uppercase tracking-[0.14em] text-primary-600">Evidence timeline</p>
+                  <h2 id="recent-activity-title" className="mt-1 text-base font-extrabold text-navy-900">Recent passport activity</h2>
+                </div>
+                <Badge tone="neutral">Consent trail</Badge>
+              </div>
+              <div className="grid divide-y divide-navy-100 md:grid-cols-3 md:divide-x md:divide-y-0">
+                {profile.activity.map((activity) => (
+                  <div key={activity.id} className="flex gap-3 p-5">
+                    <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary-50 text-primary-700">
+                      {activity.type === "verified" ? <UserRoundCheck className="size-4" /> : activity.type === "credential" ? <Award className="size-4" /> : <IndianRupee className="size-4" />}
+                    </div>
+                    <div>
+                      <p className="text-xs font-extrabold text-navy-900">{activity.title}</p>
+                      <p className="mt-1 text-[10px] leading-5 text-navy-500">{activity.detail}</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          </section>
+        </div>
+
+        <aside className="space-y-5">
           <Card className="p-5">
             <div className="flex items-center gap-3">
               <div className="grid size-10 place-items-center rounded-xl bg-warning-50 text-warning-700"><Sparkles className="size-5" /></div>
@@ -406,49 +465,102 @@ export function TraineeDashboard() {
             </Button>
           </Card>
 
-          <Card id="privacy" className="p-5">
+          <WhatsAppFollowup />
+
+          <Card id="privacy" className="p-5 scroll-mt-24">
             <div className="flex items-start gap-3">
               <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-emerald-50 text-success-600"><ShieldCheck className="size-4" /></div>
-              <div>
-                <h3 className="text-xs font-extrabold text-navy-900">You control your data</h3>
-                <p className="mt-1.5 text-[10px] leading-5 text-navy-500">Employment details are shared only for consented verification. You can review or withdraw consent at any time.</p>
-                <button type="button" className="mt-3 text-[10px] font-extrabold text-primary-600 hover:underline">Review privacy settings</button>
+              <div className="min-w-0 flex-1">
+                <h3 className="text-xs font-extrabold text-navy-900">Privacy &amp; consent</h3>
+                <p className="mt-1.5 text-[10px] leading-5 text-navy-500">Employment details are shared only for consented verification. Communication is optional — choose how SkillTrace may contact you.</p>
+                {consent ? (
+                  <div className="mt-3 space-y-2" role="group" aria-label="Follow-up preferences">
+                    {([
+                      ["employer_verification_consent", "Allow employer verification"],
+                      ["followup_consent", "Allow employment status follow-ups"],
+                      ["email_followup_consent", "Contact me by email"],
+                      ["whatsapp_followup_consent", "Contact me by WhatsApp"],
+                    ] as const).map(([key, label]) => (
+                      <label key={key} className="flex cursor-pointer items-center gap-2 text-[11px] font-bold text-navy-700">
+                        <input
+                          type="checkbox"
+                          checked={consent[key]}
+                          disabled={consentSaving}
+                          onChange={(event) => void saveConsent({ ...consent, [key]: event.target.checked })}
+                          className="size-4 accent-emerald-600"
+                        />
+                        {label}
+                      </label>
+                    ))}
+                    {consentMessage && <p className="text-[10px] font-bold text-emerald-700" role="status">{consentMessage}</p>}
+                    <Link href="/trainee/consent" className="mt-1 inline-flex items-center gap-1 text-[11px] font-bold text-primary-600 hover:underline">
+                      Manage all preferences <ArrowRight className="size-3" />
+                    </Link>
+                  </div>
+                ) : (
+                  <p className="mt-3 text-[10px] leading-5 text-navy-500">Sign in with a live account to manage consent. Demo mode shows illustrative settings.</p>
+                )}
               </div>
             </div>
           </Card>
+
+          <Card className="p-5" aria-label="Follow-up and check-ins">
+            <div className="flex items-center gap-3">
+              <div className="grid size-10 place-items-center rounded-xl bg-primary-50 text-primary-700"><CalendarCheck2 className="size-5" /></div>
+              <div>
+                <p className="text-[9px] font-extrabold uppercase tracking-[0.13em] text-primary-600">Follow-up & check-ins</p>
+                <h3 className="mt-0.5 text-sm font-extrabold text-navy-900">
+                  Next: {followups.find((f) => f.status === "SCHEDULED")?.scheduled_for ?? "No follow-up scheduled"}
+                </h3>
+              </div>
+            </div>
+            {followups.length === 0 ? (
+              <p className="mt-3 text-[11px] leading-5 text-navy-500">No follow-up scheduled yet. One is created automatically after you submit an outcome.</p>
+            ) : (
+              <ul className="mt-3 space-y-2">
+                {followups.slice(0, 4).map((item) => (
+                  <li key={item.id} className="flex items-center justify-between gap-2 rounded-lg border border-navy-100 px-3 py-2 text-[10px] font-bold text-navy-600">
+                    <span>{item.scheduled_for} · {item.channel ?? item.contact_method ?? "PHONE"}{item.template ? ` · ${item.template.replaceAll("_", " ")}` : ""}{item.response ? ` · replied ${item.response}` : ""}</span>
+                    <span className="rounded-full bg-soft-slate px-2 py-0.5">{item.status}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </Card>
+
+          <Card id="followup-history" className="scroll-mt-24 p-5" aria-label="Follow-up history">
+            <p className="text-[9px] font-extrabold uppercase tracking-[0.13em] text-primary-600">Follow-up history</p>
+            <h3 className="mt-0.5 text-sm font-extrabold text-navy-900">Every check-in, with delivery state</h3>
+            {followups.length === 0 ? (
+              <p className="mt-3 text-[11px] leading-5 text-navy-500">No follow-up records yet.</p>
+            ) : (
+              <ul className="mt-3 space-y-2">
+                {[...followups].sort((a, b) => b.scheduled_for.localeCompare(a.scheduled_for)).map((item) => {
+                  const providerId = item.provider_message_id ?? "";
+                  const display =
+                    providerId.startsWith("sim-") || providerId.startsWith("mock-")
+                      ? "SIMULATED"
+                      : item.status;
+                  return (
+                    <li key={item.id} className="rounded-lg border border-navy-100 px-3 py-2">
+                      <div className="flex items-center justify-between gap-2 text-[10px] font-bold text-navy-600">
+                        <span>{item.scheduled_for} · {(item.template ?? item.channel ?? item.contact_method ?? "check-in").replaceAll("_", " ")}</span>
+                        <span className={cn("rounded-full px-2 py-0.5", display === "SIMULATED" ? "bg-amber-100 text-amber-800" : "bg-soft-slate")}>{display}</span>
+                      </div>
+                      {(item.sent_at || item.delivered_at || item.response) && (
+                        <p className="mt-1 text-[9px] text-navy-400">
+                          {[item.sent_at && `sent ${item.sent_at}`, item.delivered_at && `delivered ${item.delivered_at}`, item.response && `replied ${item.response}`].filter(Boolean).join(" · ")}
+                        </p>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </Card>
         </aside>
       </div>
-
-      <section className="mt-5" aria-labelledby="recent-activity-title">
-        <Card className="overflow-hidden">
-          <div className="flex items-center justify-between border-b border-navy-100 px-5 py-4 sm:px-6">
-            <div>
-              <p className="text-[9px] font-extrabold uppercase tracking-[0.14em] text-primary-600">Evidence timeline</p>
-              <h2 id="recent-activity-title" className="mt-1 text-base font-extrabold text-navy-900">Recent passport activity</h2>
-            </div>
-            <Badge tone="neutral">Consent trail</Badge>
-          </div>
-          <div className="grid divide-y divide-navy-100 md:grid-cols-3 md:divide-x md:divide-y-0">
-            {profile.activity.map((activity) => (
-              <div key={activity.id} className="flex gap-3 p-5">
-                <div className="grid size-9 shrink-0 place-items-center rounded-lg bg-primary-50 text-primary-700">
-                  {activity.type === "verified" ? <UserRoundCheck className="size-4" /> : activity.type === "credential" ? <Award className="size-4" /> : <IndianRupee className="size-4" />}
-                </div>
-                <div>
-                  <p className="text-xs font-extrabold text-navy-900">{activity.title}</p>
-                  <p className="mt-1 text-[10px] leading-5 text-navy-500">{activity.detail}</p>
-                </div>
-              </div>
-            ))}
-          </div>
-        </Card>
-        </section>
       </AppShell>
-      <OutcomeWizard
-        open={wizardOpen}
-        onClose={() => setWizardOpen(false)}
-        onComplete={completeUpdate}
-      />
     </>
   );
 }

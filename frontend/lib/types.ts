@@ -9,6 +9,13 @@ export function normalizeRole(role: string): UserRole {
   return "trainee";
 }
 
+/** Single source of truth for post-login navigation. Takes the BACKEND role. */
+export function getDashboardRoute(role: UserRole): string {
+  if (role === "employer") return "/employer/dashboard";
+  if (role === "admin") return "/dashboard";
+  return "/trainee/dashboard";
+}
+
 export interface ApiEnvelope<T> {
   success: boolean;
   data: T;
@@ -67,6 +74,8 @@ export interface DistrictOutcome {
   risk_level: DistrictRiskLevel;
   lat: number | null;
   lng: number | null;
+  pending_verification?: number;
+  followup_due?: number;
 }
 
 export interface TrendPoint {
@@ -98,6 +107,9 @@ export interface DashboardOverview {
   trend: TrendPoint[];
   province: string;
   updated_at: string;
+  pending_verification?: number;
+  self_employed?: number;
+  training_completed?: number;
 }
 
 export interface FunnelStage {
@@ -253,6 +265,7 @@ export interface VerificationUpdate {
   skill_relevance: number;
   feedback: string;
   correction_reason?: string;
+  decision?: "confirm" | "correction" | "reject";
 }
 
 export type OutcomeStatus =
@@ -334,6 +347,10 @@ export interface ApiPassport {
     longitude: number | null;
     consent_given: boolean;
     data_processing_allowed: boolean;
+    employer_verification_consent?: boolean;
+    followup_consent?: boolean;
+    email_followup_consent?: boolean;
+    whatsapp_followup_consent?: boolean;
   };
   training: {
     id: string;
@@ -419,6 +436,11 @@ export interface TraineeProfile {
     month_6: number;
     month_12: number;
   };
+  milestones: Array<{
+    label: "3M" | "6M" | "12M";
+    status: string;
+    due_date: string | null;
+  }>;
   skill_relevance: {
     score: number;
     label: string;
@@ -447,4 +469,182 @@ export interface DataSourceState {
   source: "live" | "demo";
   lastUpdated: string;
   message?: string;
+}
+
+export interface ConsentPreferences {
+  data_processing_allowed: boolean;
+  consent_given: boolean;
+  employer_verification_consent: boolean;
+  followup_consent: boolean;
+  email_followup_consent: boolean;
+  whatsapp_followup_consent: boolean;
+}
+
+export interface ApiFollowup {
+  id: string;
+  employment_id: string | null;
+  status: string;
+  scheduled_for: string;
+  completed_at: string | null;
+  contact_method: string | null;
+  channel: string | null;
+  notes: string | null;
+  next_followup_date: string | null;
+  attempt_count: number;
+  sent_at: string | null;
+  delivered_at: string | null;
+  last_error: string | null;
+  template: string | null;
+  response: string | null;
+  responded_at: string | null;
+  provider_message_id: string | null;
+}
+
+export interface WhatsAppDemoMessage {
+  to_masked: string;
+  message: string;
+  wa_link: string;
+  provider: string;
+  sent: boolean;
+  notice: string;
+}
+
+export interface WhatsAppStatus {
+  consent: boolean;
+  phone_masked: string | null;
+  frequency: string;
+  next_followup: string | null;
+  last_message: string | null;
+  provider: string;
+}
+
+export interface WhatsAppHistoryItem {
+  id: string;
+  scheduled_for: string;
+  template: string | null;
+  status: string;
+  display_status: string;
+  sent_at: string | null;
+  delivered_at: string | null;
+  response: string | null;
+  responded_at: string | null;
+}
+
+export interface MessageTemplate {
+  id: string;
+  name: string;
+  template_key: string;
+  channel: string;
+  body: string;
+  variables: string[];
+  is_active: boolean;
+}
+
+export interface AudienceFilter {
+  district?: string;
+  course?: string;
+  employment_status?: string;
+  followup_due?: boolean;
+  consent_given?: boolean;
+  search?: string;
+  trainee_ids?: string[];
+}
+
+export interface Campaign {
+  id: string;
+  name: string;
+  template_key: string | null;
+  audience_filter: Record<string, unknown> | null;
+  channel: string;
+  status: string;
+  scheduled_at: string | null;
+  created_at: string;
+  queued: number;
+  sent: number;
+  delivered: number;
+  failed: number;
+}
+
+export interface Automation {
+  id: string;
+  name: string;
+  trigger_type: string;
+  delay_days: number[];
+  is_active: boolean;
+  enrolled: number;
+  scheduled: number;
+  delivered: number;
+  failed: number;
+  pending: number;
+}
+
+export interface OutreachAnalytics {
+  active_automations: number;
+  total_automations: number;
+  enrolled: number;
+  messages_scheduled: number;
+  delivered: number;
+  failed: number;
+  pending: number;
+  simulated: number;
+  next_run: string;
+}
+
+export interface TraineeOutreachRow {
+  trainee_id: string;
+  name: string;
+  district: string;
+  training: string | null;
+  employment: string | null;
+  company: string | null;
+  next_followup: string | null;
+  whatsapp_consent: boolean;
+  phone_masked: string | null;
+  last_updated: string;
+  status: string;
+}
+
+export interface ApiNotification {
+  id: string;
+  type: string;
+  title: string;
+  body: string;
+  is_read: boolean;
+  created_at: string;
+}
+
+export interface NotificationList {
+  notifications: ApiNotification[];
+  unread_count: number;
+}
+
+export interface ProfileUpdatePayload {
+  full_name?: string;
+  phone?: string;
+  district?: string;
+  address?: string;
+}
+
+export interface ApiEmployerProfile {
+  id: string;
+  full_name: string;
+  email: string;
+  phone: string | null;
+  role: string;
+  organization_name: string;
+  organization_type: string | null;
+  registration_number: string | null;
+  district: string;
+  address: string | null;
+  website: string | null;
+  is_verified: boolean;
+}
+
+export interface EmployerProfileUpdatePayload {
+  full_name?: string;
+  phone?: string;
+  organization_name?: string;
+  district?: string;
+  address?: string;
+  website?: string;
 }
